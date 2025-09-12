@@ -1,0 +1,5 @@
+pyaudio
+imageio-ffmpeg
+ffmpeg-python
+httpx
+requests
