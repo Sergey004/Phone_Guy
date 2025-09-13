@@ -30,8 +30,13 @@ class RTPHandler:
         self.jitter_min_level = 3
 
     def _timestamp_step(self) -> int:
-        if str(self.negotiated_codec).upper() == 'OPUS':
-            return 960
+        # Timestamp step per 20ms frame based on codec
+        codec = str(self.negotiated_codec).upper()
+        if 'G726' in codec:
+            return 160  # 8000 Hz * 0.02s
+        # OPUS is not currently implemented in RTPHandler; default to G.711 step
+        # if codec == 'OPUS':
+        #     return 960
         return 160
 
     def start_rtp(self, local_addr, remote_rtp_addr):
@@ -232,3 +237,27 @@ class RTPHandler:
         b1 = self.negotiated_pt & 0x7F
         header = struct.pack('!BBHII', b0, b1, self.rtp_seq, self.rtp_timestamp, self.ssrc)
         return header + payload
+
+    def stop(self):
+        try:
+            self.rtp_running = False
+            # Close socket
+            try:
+                if self.rtp_sock:
+                    self.rtp_sock.close()
+            finally:
+                self.rtp_sock = None
+            # Join threads if they were started
+            for th in (self.send_thread, self.recv_thread, self.playout_thread):
+                if th and th.is_alive():
+                    try:
+                        th.join(timeout=1.0)
+                    except Exception:
+                        pass
+            self.send_thread = None
+            self.recv_thread = None
+            self.playout_thread = None
+            self.remote_rtp_addr = None
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"Error during RTPHandler.stop(): {e}")

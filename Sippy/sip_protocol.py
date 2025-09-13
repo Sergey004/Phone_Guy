@@ -13,9 +13,13 @@ class SIPProtocol:
         else:
             self.logger.setLevel(logging.INFO)
 
-    def build_register(self, auth=None):
+    def build_register(self, auth=None, expires=None):
         method = 'REGISTER'
         uri = f'sip:{self.client.domain}:{self.client.remote_port};transport={self.client.transport}'
+        
+        # Use provided expires value or default to register_interval
+        expires_value = expires if expires is not None else self.client.register_interval
+        
         headers = [
             f'{method} {uri} SIP/2.0',
             f'Via: SIP/2.0/UDP {self.client.local_addr}:{self.client.local_port};branch={self.client.branch}',
@@ -23,10 +27,12 @@ class SIPProtocol:
             f'To: <sip:{self.client.username}@{self.client.domain}>',
             f'Call-ID: {self.client.call_id}',
             f'CSeq: {self.client.cseq} {method}',
-            f'Contact: <sip:{self.client.username}@{self.client.local_addr}:{self.client.local_port}>',
+            f'Contact: <sip:{self.client.username}@{self.client.local_addr}:{self.client.local_port};transport={self.client.transport};+sip.instance="urn:uuid:{self.client.urnUUID}">',
+            f'Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, NOTIFY, MESSAGE',
             f'Max-Forwards: 70',
+            f'Allow-Events: org.3gpp.nwinitdereg',
             f'User-Agent: PurePythonSIP/1.0',
-            f'Expires: {self.client.register_interval}',
+            f'Expires: {expires_value}',
             'Content-Length: 0'
         ]
         if auth:
@@ -65,7 +71,7 @@ class SIPProtocol:
 
     def build_sdp(self, mode='sendrecv'):
         port = self.client.config['rtp']['local_port']
-        # Ограничиваем кодеки только PCMU и PCMA, как в pyVoIP
+        # Offer only codecs implemented in our RTPHandler (PCMU and PCMA)
         offered_pts = [0, 8]  # 0 = PCMU, 8 = PCMA
         rtpmap_lines = ['a=rtpmap:0 PCMU/8000\r\n', 'a=rtpmap:8 PCMA/8000\r\n']
         m_line = f"m=audio {port} RTP/AVP " + ' '.join(str(pt) for pt in offered_pts) + '\r\n'
@@ -201,7 +207,7 @@ class SIPProtocol:
         return (ip, port) if ip and port else (self.client.domain, 4000)
 
     def get_preferred_payload_type(self, sdp):
-        # Parse remote SDP and choose by our configured preference order (extended codecs supported)
+        # Choose codec/PT based on intersection of remote offer and our supported set
         lines = sdp.split('\r\n')
         payloads = []
         rtpmap = {}
@@ -223,43 +229,45 @@ class SIPProtocol:
                     rtpmap[pt] = codec
                 except Exception:
                     continue
-        prefs = [c.upper() for c in self.client.config.get('rtp', {}).get('preferred_codecs', ['PCMU', 'PCMA'])]
-        # Try by preference
-        for pref in prefs:
-            if pref == 'PCMU' and 0 in payloads:
+        # Our supported codecs (align with RTPHandler implementation)
+        supported = [c.upper() for c in self.client.config.get('rtp', {}).get('supported_codecs', ['PCMU', 'PCMA'])]
+        # Preference order (default PCMU, PCMA)
+        prefs = [c.upper() for c in self.client.config.get('rtp', {}).get('preferred_codecs', supported)]
+        # Map well-known static PTs
+        def choose_pcm():
+            if 0 in payloads and 'PCMU' in supported:
                 return 0, 'PCMU'
-            if pref == 'PCMA' and 8 in payloads:
+            if 8 in payloads and 'PCMA' in supported:
                 return 8, 'PCMA'
-            if pref in ('G729', 'G729A'):
-                if 18 in payloads:
-                    return 18, 'G729'
-                for pt in payloads:
-                    if rtpmap.get(pt, '').upper().startswith('G729'):
-                        return pt, 'G729'
-            if pref == 'OPUS':
-                for pt in payloads:
-                    if rtpmap.get(pt, '').upper() == 'OPUS':
-                        return pt, 'OPUS'
+            return None
+        # Try preferences
+        for pref in prefs:
+            if pref == 'PCMU' and 0 in payloads and 'PCMU' in supported:
+                return 0, 'PCMU'
+            if pref == 'PCMA' and 8 in payloads and 'PCMA' in supported:
+                return 8, 'PCMA'
             if pref.startswith('G726') or pref == 'G726':
-                for pt in payloads:
-                    name = rtpmap.get(pt, '').upper()
-                    if 'G726' in name:
-                        # Normalize name for RTP layer
-                        return pt, 'G726-32'
-        # Fallbacks to G.711 if available
-        if 0 in payloads:
-            return 0, 'PCMU'
-        if 8 in payloads:
-            return 8, 'PCMA'
-        # Fallback to any named codec
+                if 'G726' in supported:
+                    for pt in payloads:
+                        name = rtpmap.get(pt, '').upper()
+                        if 'G726' in name:
+                            # Normalize to a common label for RTP layer
+                            return pt, 'G726-32'
+        # Fallbacks limited to our implementation
+        pcm = choose_pcm()
+        if pcm:
+            return pcm
+        # Last resort: pick any remotely offered PCMU/PCMA/G726 if we support it
         for pt in payloads:
             name = rtpmap.get(pt, '').upper()
-            if name in ('PCMU', 'PCMA', 'G729', 'OPUS') or 'G726' in name:
-                # Return whatever was advertised
-                return pt, name
-        if payloads:
-            pt = payloads[0]
-            return pt, rtpmap.get(pt, f'PT{pt}')
+            if name in supported or ('G726' in name and 'G726' in supported):
+                if name == 'PCMU':
+                    return pt, 'PCMU'
+                if name == 'PCMA':
+                    return pt, 'PCMA'
+                if 'G726' in name and 'G726' in supported:
+                    return pt, 'G726-32'
+        # Default safe codec
         return 0, 'PCMU'
 
     def is_hold_sdp(self, sdp):

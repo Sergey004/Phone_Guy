@@ -7,6 +7,7 @@ import socket
 import hashlib
 import random
 import string
+import uuid
 from datetime import datetime
 
 from Sippy.audio_handler import AudioHandler
@@ -43,6 +44,7 @@ class SIPClient:
         self.established_to = None
         # Адрес для bind(); может оставаться 0.0.0.0, даже если в SIP/SDP нужен реальный IP
         self.bind_addr = self.local_addr
+        self.urnUUID = str(uuid.uuid4()).upper()
 
     def connect(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -77,29 +79,103 @@ class SIPClient:
 
     def register(self):
         auth = None
-        while True:
+        try:
+            # First registration attempt
             self.cseq += 1 # Increment cseq for each new request
             register_msg = self.sip.build_register(auth)
             self._send(register_msg)
             response = self._receive()
             parsed = self.sip.parse_sip_message(response)
+            
             if parsed['status_code'] == '401':
+                # Handle authentication challenge
                 auth = self.sip.parse_auth_header(response)
                 if auth:
                     self.logger.info('Received 401 Unauthorized, attempting digest authentication.')
-                    # The build_register method in sip_protocol.py will handle HA1, HA2, and response calculation
-                    # and construct the Authorization header when 'auth' dictionary is provided.
-                    continue
+                    self.cseq += 1
+                    register_msg = self.sip.build_register(auth)
+                    self._send(register_msg)
+                    response = self._receive()
+                    parsed = self.sip.parse_sip_message(response)
+                    
+                    if parsed['status_code'] == '200':
+                        self.logger.info('Registration successful')
+                        # Start registration refresh timer
+                        self._start_register_timer()
+                        return True
+                    else:
+                        self.logger.error(f"Registration failed with status code {parsed['status_code']}")
+                        return False
                 else:
                     self.logger.error('Failed to parse WWW-Authenticate header.')
-                    break
+                    return False
             elif parsed['status_code'] == '200':
                 self.logger.info('Registration successful')
-                break
+                # Start registration refresh timer
+                self._start_register_timer()
+                return True
             else:
-                self.logger.error(f'Registration failed with status {parsed["status_code"]}')
-                break
+                self.logger.error(f"Registration failed with status code {parsed['status_code']}")
+                return False
+        except Exception as e:
+            self.logger.error(f"Registration error: {e}")
+            return False
+             
+    def _start_register_timer(self, delay=None):
+        """Start a timer to refresh registration before it expires"""
+        if delay is None:
+            delay = self.register_interval - 5  # Register 5 seconds before expiration
+        
+        self.logger.debug(f"Setting up registration refresh timer for {delay} seconds")
+        timer = threading.Timer(delay, self.register)
+        timer.daemon = True
+        timer.name = "SIP Register Refresh"
+        timer.start()
 
+    def deregister(self):
+        """Deregister from the SIP server"""
+        try:
+            self.logger.info("Deregistering from SIP server")
+            # Send a REGISTER with expires=0
+            auth = None
+            self.cseq += 1
+            
+            # First deregistration attempt
+            register_msg = self.sip.build_register(auth, expires=0)
+            self._send(register_msg)
+            response = self._receive()
+            parsed = self.sip.parse_sip_message(response)
+            
+            if parsed['status_code'] == '401':
+                # Handle authentication challenge
+                auth = self.sip.parse_auth_header(response)
+                if auth:
+                    self.logger.info('Received 401 Unauthorized, attempting digest authentication for deregistration')
+                    self.cseq += 1
+                    register_msg = self.sip.build_register(auth, expires=0)
+                    self._send(register_msg)
+                    response = self._receive()
+                    parsed = self.sip.parse_sip_message(response)
+                    
+                    if parsed['status_code'] == '200':
+                        self.logger.info('Deregistration successful')
+                        return True
+                    else:
+                        self.logger.error(f"Deregistration failed with status code {parsed['status_code']}")
+                        return False
+                else:
+                    self.logger.error('Failed to parse WWW-Authenticate header during deregistration')
+                    return False
+            elif parsed['status_code'] == '200':
+                self.logger.info('Deregistration successful')
+                return True
+            else:
+                self.logger.error(f"Deregistration failed with status code {parsed['status_code']}")
+                return False
+        except Exception as e:
+            self.logger.error(f"Deregistration error: {e}")
+            return False
+            
     def make_call(self, target):
         # Ensure target is a valid SIP URI
         if not target.startswith('sip:'):
@@ -170,35 +246,35 @@ class SIPClient:
                                 bind_ip = self.bind_addr if self.bind_addr in ('0.0.0.0', '::') else self.local_addr
                                 self.rtp.start_rtp(bind_ip, self.remote_rtp_addr)
                                 self.call_established.set()
-                elif parsed['status_code'] == '401':
-                    auth_header = self.sip.parse_auth_header(response)
-                    ha1 = hashlib.md5(f'{self.username}:{auth_header["realm"]}:{self.password}'.encode()).hexdigest()
-                    ha2 = hashlib.md5(f'INVITE:{self.target}'.encode()).hexdigest()
-                    if 'qop' in auth_header:
-                        cnonce = ''.join(random.choices('0123456789abcdef', k=16))
-                        self.nonce_count += 1
-                        nc = f"{self.nonce_count:08x}"
-                        digest_response = hashlib.md5(f'{ha1}:{auth_header["nonce"]}:{nc}:{cnonce}:{auth_header["qop"]}:{ha2}'.encode()).hexdigest()
-                        auth_str = f'Digest username="{self.username}", realm="{auth_header["realm"]}", nonce="{auth_header["nonce"]}", uri="{self.target}", response="{digest_response}", algorithm=MD5, qop="{auth_header["qop"]}", nc={nc}, cnonce="{cnonce}"'
-                    else:
-                        digest_response = hashlib.md5(f'{ha1}:{auth_header["nonce"]}:{ha2}'.encode()).hexdigest()
-                        auth_str = f'Digest username="{self.username}", realm="{auth_header["realm"]}", nonce="{auth_header["nonce"]}", uri="{self.target}", response="{digest_response}", algorithm=MD5'
-                    invite_headers = {
-                        'Via': f'SIP/2.0/UDP {self.local_addr}:{self.local_port};branch={self.branch}',
-                        'From': self.invite_from,
-                        'To': self.invite_to,
-                        'Call-ID': self.call_id,
-                        'CSeq': f'{self.cseq} INVITE',
-                        'Contact': f'<sip:{self.username}@{self.local_addr}:{self.local_port}>',
-                        'Authorization': auth_str,
-                        'Max-Forwards': '70',
-                        'User-Agent': 'PurePythonSIP/1.0',
-                        'Content-Type': 'application/sdp'
-                    }
-                    sdp = self.sip.build_sdp()
-                    auth_invite_msg = self.sip.build_sip_message('INVITE', self.target, invite_headers, sdp)
-                    self._send(auth_invite_msg)
-                    self.cseq += 1
+                            elif parsed['status_code'] == '401':
+                                auth_header = self.sip.parse_auth_header(response)
+                                ha1 = hashlib.md5(f'{self.username}:{auth_header["realm"]}:{self.password}'.encode()).hexdigest()
+                                ha2 = hashlib.md5(f'INVITE:{self.target}'.encode()).hexdigest()
+                                if 'qop' in auth_header:
+                                    cnonce = ''.join(random.choices('0123456789abcdef', k=16))
+                                    self.nonce_count += 1
+                                    nc = f"{self.nonce_count:08x}"
+                                    digest_response = hashlib.md5(f'{ha1}:{auth_header["nonce"]}:{nc}:{cnonce}:{auth_header["qop"]}:{ha2}'.encode()).hexdigest()
+                                    auth_str = f'Digest username="{self.username}", realm="{auth_header["realm"]}", nonce="{auth_header["nonce"]}", uri="{self.target}", response="{digest_response}", algorithm=MD5, qop="{auth_header["qop"]}", nc={nc}, cnonce="{cnonce}"'
+                                else:
+                                    digest_response = hashlib.md5(f'{ha1}:{auth_header["nonce"]}:{ha2}'.encode()).hexdigest()
+                                    auth_str = f'Digest username="{self.username}", realm="{auth_header["realm"]}", nonce="{auth_header["nonce"]}", uri="{self.target}", response="{digest_response}", algorithm=MD5'
+                                invite_headers = {
+                                    'Via': f'SIP/2.0/UDP {self.local_addr}:{self.local_port};branch={self.branch}',
+                                    'From': self.invite_from,
+                                    'To': self.invite_to,
+                                    'Call-ID': self.call_id,
+                                    'CSeq': f'{self.cseq} INVITE',
+                                    'Contact': f'<sip:{self.username}@{self.local_addr}:{self.local_port}>',
+                                    'Authorization': auth_str,
+                                    'Max-Forwards': '70',
+                                    'User-Agent': 'PurePythonSIP/1.0',
+                                    'Content-Type': 'application/sdp'
+                                }
+                                sdp = self.sip.build_sdp()
+                                auth_invite_msg = self.sip.build_sip_message('INVITE', self.target, invite_headers, sdp)
+                                self._send(auth_invite_msg)
+                                self.cseq += 1
                             elif parsed['status_code'] == '486':
                                 self.logger.info('Busy')
                             else:
@@ -220,7 +296,7 @@ class SIPClient:
         self.rtp.start_rtp(bind_ip, self.remote_rtp_addr)
 
     def stop_rtp(self):
-        self.rtp.stop_rtp()
+        self.rtp.stop()
 
     def play_audio(self, wav_path):
         self.logger.info(f"Setting next outgoing audio to: {wav_path}")
@@ -293,3 +369,11 @@ class SIPClient:
                 return True
         except:
             return False
+            
+    def stop(self):
+        # Deregister from SIP server first
+        if hasattr(self, 'sock') and self.sock:
+            self.deregister()
+            self.sock.close()
+        if hasattr(self, 'rtp') and self.rtp:
+            self.rtp.stop()

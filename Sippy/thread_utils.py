@@ -1,4 +1,23 @@
 import threading
+from contextlib import contextmanager
+import socket
+
+@contextmanager
+def acquired_lock_and_unblocked_socket(lock, sock):
+    """Context manager that acquires a lock and sets a socket to non-blocking mode.
+    
+    Args:
+        lock: The lock to acquire
+        sock: The socket to set to non-blocking mode
+    """
+    blocking = sock.getblocking()
+    sock.setblocking(False)
+    lock.acquire()
+    try:
+        yield
+    finally:
+        sock.setblocking(blocking)
+        lock.release()
 
 class ThreadedLoop:
     """Run a target function repeatedly in a daemon thread until stopped."""
