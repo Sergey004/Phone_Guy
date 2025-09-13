@@ -15,13 +15,16 @@ class SIPProtocol:
 
     def build_register(self, auth=None, expires=None):
         method = 'REGISTER'
-        uri = f'sip:{self.client.domain}:{self.client.remote_port};transport={self.client.transport}'
+        # Use the correct URI format for the request line
+        request_uri = f'sip:{self.client.domain}:{self.client.remote_port};transport={self.client.transport}'
+        # For digest authentication, the URI should match the request URI
+        digest_uri = request_uri
         
         # Use provided expires value or default to register_interval
         expires_value = expires if expires is not None else self.client.register_interval
         
         headers = [
-            f'{method} {uri} SIP/2.0',
+            f'{method} {request_uri} SIP/2.0',
             f'Via: SIP/2.0/UDP {self.client.local_addr}:{self.client.local_port};branch={self.client.branch}',
             f'From: <sip:{self.client.username}@{self.client.domain}>;tag={self.client.tag}',
             f'To: <sip:{self.client.username}@{self.client.domain}>',
@@ -36,19 +39,29 @@ class SIPProtocol:
             'Content-Length: 0'
         ]
         if auth:
+            # Calculate HA1 = MD5(username:realm:password)
             ha1 = hashlib.md5(f'{self.client.username}:{auth["realm"]}:{self.client.password}'.encode()).hexdigest()
-            ha2 = hashlib.md5(f'{method}:{uri}'.encode()).hexdigest()
+            # Calculate HA2 = MD5(method:digest-uri)
+            # Use simple URI format for digest calculation
+            simple_uri = f'sip:{self.client.domain}'
+            ha2 = hashlib.md5(f'{method}:{simple_uri}'.encode()).hexdigest()
             self.logger.debug(f'HA1: {ha1}')
             self.logger.debug(f'HA2: {ha2}')
+            
             if 'qop' in auth:
+                # Generate client nonce
                 cnonce = ''.join(random.choices('0123456789abcdef', k=16))
+                # Increment nonce count
                 self.client.nonce_count += 1
                 nc = f"{self.client.nonce_count:08x}"
+                # Calculate response = MD5(HA1:nonce:nc:cnonce:qop:HA2)
                 response = hashlib.md5(f'{ha1}:{auth["nonce"]}:{nc}:{cnonce}:{auth["qop"]}:{ha2}'.encode()).hexdigest()
-                auth_str = f'Digest username="{self.client.username}", realm="{auth["realm"]}", nonce="{auth["nonce"]}", uri="{uri}", response="{response}", algorithm=MD5, qop="{auth["qop"]}", nc={nc}, cnonce="{cnonce}"'
+                auth_str = f'Digest username="{self.client.username}", realm="{auth["realm"]}", nonce="{auth["nonce"]}", uri="sip:{self.client.domain}", response="{response}", algorithm=MD5, qop="{auth["qop"]}", nc={nc}, cnonce="{cnonce}"'
             else:
+                # Calculate response = MD5(HA1:nonce:HA2)
                 response = hashlib.md5(f'{ha1}:{auth["nonce"]}:{ha2}'.encode()).hexdigest()
-                auth_str = f'Digest username="{self.client.username}", realm="{auth["realm"]}", nonce="{auth["nonce"]}", uri="{uri}", response="{response}", algorithm=MD5'
+                auth_str = f'Digest username="{self.client.username}", realm="{auth["realm"]}", nonce="{auth["nonce"]}", uri="sip:{self.client.domain}", response="{response}", algorithm=MD5'
+            
             self.logger.debug(f'Digest Response: {response}')
             self.logger.debug(f'Authorization Header: {auth_str}')
             headers.insert(6, f'Authorization: {auth_str}')
@@ -60,13 +73,24 @@ class SIPProtocol:
                 auth_str = line.split(':', 1)[1].strip()
                 if auth_str.startswith('Digest '):
                     auth_str = auth_str[7:]
-                parts = [p.strip() for p in auth_str.split(',')]
+                
+                # Improved parsing of authentication parameters
                 auth = {}
-                for part in parts:
-                    if '=' in part:
-                        key, value = part.split('=', 1)
-                        auth[key.strip()] = value.strip('"')
+                # Use regex to properly handle quoted values with commas inside
+                import re
+                pattern = re.compile(r'(\w+)=(?:"([^"]+)"|([^,]+))')
+                matches = pattern.findall(auth_str)
+                
+                for match in matches:
+                    key = match[0].strip()
+                    # If quoted value is captured in group 2, otherwise use group 3
+                    value = match[1] if match[1] else match[2].strip()
+                    auth[key] = value
+                
+                self.logger.debug(f"Parsed authentication parameters: {auth}")
                 return auth
+        
+        self.logger.warning("WWW-Authenticate header not found in response")
         return None
 
     def build_sdp(self, mode='sendrecv'):
@@ -92,8 +116,6 @@ class SIPProtocol:
         headers = {}
         body = ''
         header_end = False
-        sender_address = None
-        
         for line in lines[1:]:
             if not line:
                 header_end = True
@@ -103,108 +125,175 @@ class SIPProtocol:
             else:
                 if ':' in line:
                     key, value = line.split(':', 1)
-                    key = key.strip()
-                    value = value.strip()
-                    headers[key] = value
-                    
-                    # Извлекаем адрес отправителя из заголовка Via
-                    if key == 'Via':
-                        try:
-                            # Формат: SIP/2.0/UDP 192.168.1.100:5060;branch=z9hG4bK...
-                            via_parts = value.split(';')[0].split(' ')
-                            if len(via_parts) > 1:
-                                addr_port = via_parts[1]
-                                if ':' in addr_port:
-                                    addr, port = addr_port.split(':')
-                                    sender_address = (addr, int(port))
-                                    self.logger.debug(f'Extracted sender address from Via: {sender_address}')
-                        except Exception as e:
-                            self.logger.warning(f'Failed to extract sender address from Via: {e}')
-
-        parts = request_line.split()
-        if len(parts) >= 3 and parts[0].startswith('SIP/'):
+                    headers[key.strip()] = value.strip()
+        if request_line.startswith('SIP/2.0 '):
             msg_type = 'response'
+            parts = request_line.split(maxsplit=2)
             version = parts[0]
             status_code = parts[1]
-            reason = ' '.join(parts[2:])
-            method = None
-            uri = None
-        elif len(parts) == 3:
+            reason = parts[2] if len(parts) > 2 else ''
+        else:
             msg_type = 'request'
+            parts = request_line.split(maxsplit=2)
             method = parts[0]
             uri = parts[1]
-            version = parts[2]
-            status_code = None
-            reason = None
-        else:
-            msg_type = 'unknown'
-            method = None
-            uri = None
-            version = None
-            status_code = None
-            reason = None
-        if self.logger.isEnabledFor(logging.DEBUG):
-            self.logger.debug(f'Parsed SIP headers: {headers}')
-        return {
+            version = parts[2] if len(parts) > 2 else ''
+        parsed = {
             'type': msg_type,
-            'sender_address': sender_address,
-            'method': method,
-            'uri': uri,
-            'version': version,
-            'status_code': status_code,
-            'reason': reason,
             'headers': headers,
             'body': body.strip()
         }
-
-    def build_sip_message(self, method, uri, headers, body=''):
-        if uri:
-            start_line = f'{method} {uri} SIP/2.0'
+        
+        if msg_type == 'response':
+            parsed['version'] = version
+            parsed['status_code'] = status_code
+            parsed['reason'] = reason
         else:
-            start_line = method  # For responses, method is the full 'SIP/2.0 status reason'
-        lines = [start_line]
+            parsed['version'] = version
+            parsed['method'] = method
+            parsed['uri'] = uri
         
-        # Создаем копию заголовков, чтобы не изменять оригинальный словарь
-        headers_copy = headers.copy()
-        
-        # Всегда устанавливаем правильный Content-Length
-        headers_copy['Content-Length'] = str(len(body))
-        
-        for k, v in headers_copy.items():
-            lines.append(f'{k}: {v}')
-            
-        lines.append('')
+        return parsed
+
+    def build_sip_message(self, start_line, uri, headers, body=''):
+        msg = [start_line]
+        if uri:
+            msg[0] += f' {uri}'
+        for k, v in headers.items():
+            msg.append(f'{k}: {v}')
+        msg.append(f'Content-Length: {len(body)}')
+        msg.append('')
         if body:
-            lines.append(body)
-        return '\r\n'.join(lines) + '\r\n'
-        
-    def build_bye(self):
-        # Генерируем новый уникальный branch для BYE
-        bye_branch = 'z9hG4bK' + ''.join(random.choices(string.ascii_letters + string.digits, k=10))
-        
-        bye_headers = {
-            'Via': f'SIP/2.0/UDP {self.client.local_addr}:{self.client.local_port};branch={bye_branch}',
-            'From': self.client.invite_from if hasattr(self.client, 'invite_from') else f'<sip:{self.client.username}@{self.client.domain}>;tag={self.client.tag}',
-            'To': self.client.established_to if hasattr(self.client, 'established_to') else self.client.invite_to,
-            'Call-ID': self.client.call_id,
-            'CSeq': f'{self.client.cseq} BYE',
-            'Max-Forwards': '70',
-            'User-Agent': 'PurePythonSIP/1.0'
+            msg.append(body)
+        return '\r\n'.join(msg)
+
+    def handle_options(self, msg):
+        ok_headers = {
+            'Via': msg['headers']['Via'],
+            'From': msg['headers']['From'],
+            'To': msg['headers']['To'] + ';tag=' + self.client.tag,
+            'Call-ID': msg['headers']['Call-ID'],
+            'CSeq': msg['headers']['CSeq'],
+            'Allow': 'INVITE, ACK, BYE, CANCEL, OPTIONS, NOTIFY'
         }
-        
-        self.client.cseq += 1
-        return self.build_sip_message('BYE', self.client.target, bye_headers)
+        ok_msg = self.build_sip_message('SIP/2.0 200 OK', '', ok_headers)
+        self.client._send(ok_msg, dest=msg.get('sender_address'))
+        self.logger.info('Handled OPTIONS request')
+
+    def handle_notify(self, msg):
+        ok_headers = {
+            'Via': msg['headers']['Via'],
+            'From': msg['headers']['From'],
+            'To': msg['headers']['To'] + ';tag=' + self.client.tag,
+            'Call-ID': msg['headers']['Call-ID'],
+            'CSeq': msg['headers']['CSeq']
+        }
+        ok_msg = self.build_sip_message('SIP/2.0 200 OK', '', ok_headers)
+        self.client._send(ok_msg, dest=msg.get('sender_address'))
+        self.logger.info('Handled NOTIFY request')
+
+    def handle_invite(self, msg):
+        call_id = msg['headers']['Call-ID']
+        if call_id == self.client.call_id and self.client.call_established.is_set():
+            # re-INVITE
+            is_hold = self.is_hold_sdp(msg['body'])
+            self.client.rtp.on_hold = is_hold
+            mode = 'recvonly' if is_hold else 'sendrecv'
+            sdp = self.build_sdp(mode=mode)
+            to_header = msg['headers']['To']
+            ok_headers = {
+                'Via': msg['headers']['Via'],
+                'From': msg['headers']['From'],
+                'To': to_header,
+                'Call-ID': call_id,
+                'CSeq': msg['headers']['CSeq'],
+                'Contact': f'<sip:{self.client.username}@{self.client.local_addr}:{self.client.local_port}>',
+                'Content-Type': 'application/sdp'
+            }
+            ok_msg = self.build_sip_message('SIP/2.0 200 OK', '', ok_headers, sdp)
+            self.client._send(ok_msg, dest=msg.get('sender_address'))
+            new_rtp_addr = self.parse_sdp_for_rtp(msg['body'])
+            if new_rtp_addr != self.client.remote_rtp_addr and new_rtp_addr[0] != '0.0.0.0':
+                self.client.remote_rtp_addr = new_rtp_addr
+            # Update negotiated payload type from remote SDP
+            pt, codec = self.get_preferred_payload_type(msg['body'])
+            self.client.rtp.negotiated_pt = pt
+            self.client.rtp.negotiated_codec = codec
+            self.logger.info(f'Handled re-INVITE for {"hold" if is_hold else "unhold"}; negotiated PT={pt} ({codec})')
+            return
+        # New INVITE
+        trying_headers = {
+            'Via': msg['headers']['Via'],
+            'From': msg['headers']['From'],
+            'To': msg['headers']['To'] + ';tag=' + self.client.tag,
+            'Call-ID': call_id,
+            'CSeq': msg['headers']['CSeq']
+        }
+        trying_msg = self.build_sip_message('SIP/2.0 100 Trying', '', trying_headers)
+        self.client._send(trying_msg, dest=msg.get('sender_address'))
+        ringing_headers = trying_headers.copy()
+        ringing_msg = self.build_sip_message('SIP/2.0 180 Ringing', '', ringing_headers)
+        self.client._send(ringing_msg, dest=msg.get('sender_address'))
+        sdp = self.build_sdp()
+        ok_headers = trying_headers.copy()
+        ok_headers['Contact'] = f'<sip:{self.client.username}@{self.client.local_addr}:{self.client.local_port}>'
+        ok_headers['Content-Type'] = 'application/sdp'
+        ok_msg = self.build_sip_message('SIP/2.0 200 OK', '', ok_headers, sdp)
+        self.client._send(ok_msg, dest=msg.get('sender_address'))
+        self.client.remote_rtp_addr = self.parse_sdp_for_rtp(msg['body'])
+        # Negotiate payload type from caller's SDP before starting RTP
+        pt, codec = self.get_preferred_payload_type(msg['body'])
+        self.client.rtp.negotiated_pt = pt
+        self.client.rtp.negotiated_codec = codec
+        self.logger.info(f'Negotiated PT={pt} ({codec}) for incoming call')
+
+    def handle_ack(self, msg):
+        self.logger.info('ACK received, call established')
+        if not self.client.rtp.rtp_running:
+            self.client.start_rtp()
+
+    def handle_bye(self, msg):
+        ok_headers = {
+            'Via': msg['headers']['Via'],
+            'From': msg['headers']['From'],
+            'To': msg['headers']['To'],
+            'Call-ID': msg['headers']['Call-ID'],
+            'CSeq': msg['headers']['CSeq']
+        }
+        ok_msg = self.build_sip_message('SIP/2.0 200 OK', '', ok_headers)
+        self.client._send(ok_msg, dest=msg.get('sender_address'))
+        self.logger.info('Call ended')
+        self.client.stop_rtp()
+        self.client.call_established.clear()
+        self.client.established_to = None
+
+    def handle_cancel(self, msg):
+        ok_headers = {
+            'Via': msg['headers']['Via'],
+            'From': msg['headers']['From'],
+            'To': msg['headers']['To'],
+            'Call-ID': msg['headers']['Call-ID'],
+            'CSeq': msg['headers']['CSeq']
+        }
+        ok_msg = self.build_sip_message('SIP/2.0 200 OK', '', ok_headers)
+        self.client._send(ok_msg, dest=msg.get('sender_address'))
+        request_terminated = self.build_sip_message('SIP/2.0 487 Request Terminated', '', ok_headers)
+        self.client._send(request_terminated, dest=msg.get('sender_address'))
+        self.logger.info('Call cancelled')
+
+    def is_hold_sdp(self, sdp):
+        return 'a=sendonly' in sdp or 'c=IN IP4 0.0.0.0' in sdp
 
     def parse_sdp_for_rtp(self, sdp):
         lines = sdp.split('\r\n')
         ip = None
         port = None
         for line in lines:
-            if line.startswith('c='):
+            if line.startswith('c=IN IP4 '):
                 ip = line.split(' ')[2]
-            if line.startswith('m='):
+            if line.startswith('m=audio '):
                 port = int(line.split(' ')[1])
-        return (ip, port) if ip and port else (self.client.domain, 4000)
+        return (ip, port) if ip and port else None
 
     def get_preferred_payload_type(self, sdp):
         # Choose codec/PT based on intersection of remote offer and our supported set
@@ -278,6 +367,12 @@ class SIPProtocol:
         return False
 
     def handle_message(self, msg):
+        if msg['type'] == 'response':
+            self.logger.warning(f"Received response in handle_message: {msg['status_code']} {msg['reason']}")
+            return
+        if 'method' not in msg:
+            self.logger.error("Missing 'method' in request message")
+            return
         method = msg['method']
         if method == 'INVITE':
             self.handle_invite(msg)

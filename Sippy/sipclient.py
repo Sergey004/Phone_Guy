@@ -8,6 +8,7 @@ import hashlib
 import random
 import string
 import uuid
+import select
 from datetime import datetime
 
 from Sippy.audio_handler import AudioHandler
@@ -49,6 +50,7 @@ class SIPClient:
     def connect(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.setblocking(False)
         bind_ip = self.bind_addr
         if self.local_addr in ('0.0.0.0', '', '::'):
             try:
@@ -72,10 +74,13 @@ class SIPClient:
         self.logger.debug(f'Sent to {dest}: {message}')
 
     def _receive(self):
-        data, _ = self.sock.recvfrom(4096)
-        response = data.decode()
-        self.logger.debug(f'Received: {response}')
-        return response
+        while True:
+            readable, _, _ = select.select([self.sock], [], [], 0.1)
+            if readable:
+                data, _ = self.sock.recvfrom(4096)
+                response = data.decode()
+                self.logger.debug(f'Received: {response}')
+                return response
 
     def register(self):
         auth = None
@@ -83,42 +88,69 @@ class SIPClient:
             # First registration attempt
             self.cseq += 1 # Increment cseq for each new request
             register_msg = self.sip.build_register(auth)
+            expected_cseq = self.cseq
+            self.logger.debug(f"Sending initial REGISTER request:\n{register_msg}")
             self._send(register_msg)
-            response = self._receive()
-            parsed = self.sip.parse_sip_message(response)
+            while True:
+                response = self._receive()
+                parsed = self.sip.parse_sip_message(response)
+                if parsed['type'] == 'request':
+                    self.sip.handle_message(parsed)
+                    continue
+                cseq_header = parsed['headers'].get('CSeq', '')
+                if parsed['headers'].get('Call-ID') == self.call_id and cseq_header == f"{expected_cseq} REGISTER":
+                    break
+                else:
+                    self.logger.warning(f"Ignored unrelated response: Call-ID {parsed['headers'].get('Call-ID')} CSeq {cseq_header}")
             
             if parsed['status_code'] == '401':
                 # Handle authentication challenge
                 auth = self.sip.parse_auth_header(response)
                 if auth:
-                    self.logger.info('Received 401 Unauthorized, attempting digest authentication.')
+                    self.logger.info(f'Received 401 Unauthorized, attempting digest authentication with realm: {auth.get("realm", "unknown")}.')
                     self.cseq += 1
                     register_msg = self.sip.build_register(auth)
+                    expected_cseq = self.cseq
+                    self.logger.debug(f"Sending authenticated REGISTER request:\n{register_msg}")
                     self._send(register_msg)
-                    response = self._receive()
-                    parsed = self.sip.parse_sip_message(response)
+                    while True:
+                        response = self._receive()
+                        parsed = self.sip.parse_sip_message(response)
+                        if parsed['type'] == 'request':
+                            self.sip.handle_message(parsed)
+                            continue
+                        cseq_header = parsed['headers'].get('CSeq', '')
+                        if parsed['headers'].get('Call-ID') == self.call_id and cseq_header == f"{expected_cseq} REGISTER":
+                            break
+                        else:
+                            self.logger.warning(f"Ignored unrelated response: Call-ID {parsed['headers'].get('Call-ID')} CSeq {cseq_header}")
                     
                     if parsed['status_code'] == '200':
-                        self.logger.info('Registration successful')
+                        self.logger.info('Registration successful with authentication')
                         # Start registration refresh timer
                         self._start_register_timer()
                         return True
                     else:
-                        self.logger.error(f"Registration failed with status code {parsed['status_code']}")
+                        self.logger.error(f"Registration failed with status code {parsed['status_code']} after authentication attempt")
+                        self.logger.debug(f"Failed registration response:\n{response}")
                         return False
                 else:
                     self.logger.error('Failed to parse WWW-Authenticate header.')
+                    self.logger.debug(f"Problematic WWW-Authenticate response:\n{response}")
                     return False
             elif parsed['status_code'] == '200':
-                self.logger.info('Registration successful')
+                self.logger.info('Registration successful without authentication')
                 # Start registration refresh timer
                 self._start_register_timer()
                 return True
             else:
                 self.logger.error(f"Registration failed with status code {parsed['status_code']}")
+                self.logger.debug(f"Failed registration response:\n{response}")
                 return False
         except Exception as e:
             self.logger.error(f"Registration error: {e}")
+            import traceback
+            self.logger.debug(f"Registration error traceback: {traceback.format_exc()}")
             return False
              
     def _start_register_timer(self, delay=None):
@@ -141,10 +173,20 @@ class SIPClient:
             self.cseq += 1
             
             # First deregistration attempt
+            expected_cseq = self.cseq
             register_msg = self.sip.build_register(auth, expires=0)
             self._send(register_msg)
-            response = self._receive()
-            parsed = self.sip.parse_sip_message(response)
+            while True:
+                response = self._receive()
+                parsed = self.sip.parse_sip_message(response)
+                if parsed['type'] == 'request':
+                    self.sip.handle_message(parsed)
+                    continue
+                cseq_header = parsed['headers'].get('CSeq', '')
+                if parsed['headers'].get('Call-ID') == self.call_id and cseq_header == f"{expected_cseq} REGISTER":
+                    break
+                else:
+                    self.logger.warning(f"Ignored unrelated response: Call-ID {parsed['headers'].get('Call-ID')} CSeq {cseq_header}")
             
             if parsed['status_code'] == '401':
                 # Handle authentication challenge
@@ -152,16 +194,27 @@ class SIPClient:
                 if auth:
                     self.logger.info('Received 401 Unauthorized, attempting digest authentication for deregistration')
                     self.cseq += 1
+                    expected_cseq = self.cseq
                     register_msg = self.sip.build_register(auth, expires=0)
                     self._send(register_msg)
-                    response = self._receive()
-                    parsed = self.sip.parse_sip_message(response)
+                    while True:
+                        response = self._receive()
+                        parsed = self.sip.parse_sip_message(response)
+                        if parsed['type'] == 'request':
+                            self.sip.handle_message(parsed)
+                            continue
+                        cseq_header = parsed['headers'].get('CSeq', '')
+                        if parsed['headers'].get('Call-ID') == self.call_id and cseq_header == f"{expected_cseq} REGISTER":
+                            break
+                        else:
+                            self.logger.warning(f"Ignored unrelated response: Call-ID {parsed['headers'].get('Call-ID')} CSeq {cseq_header}")
                     
                     if parsed['status_code'] == '200':
                         self.logger.info('Deregistration successful')
                         return True
                     else:
-                        self.logger.error(f"Deregistration failed with status code {parsed['status_code']}")
+                        self.logger.error(f"Deregistration failed with status code {parsed.get('status_code', 'Unknown')}")
+                        self.logger.debug(f"Failed deregistration response:\n{response}")
                         return False
                 else:
                     self.logger.error('Failed to parse WWW-Authenticate header during deregistration')
@@ -170,7 +223,8 @@ class SIPClient:
                 self.logger.info('Deregistration successful')
                 return True
             else:
-                self.logger.error(f"Deregistration failed with status code {parsed['status_code']}")
+                self.logger.error(f"Deregistration failed with status code {parsed.get('status_code', 'Unknown')}")
+                self.logger.debug(f"Failed deregistration response:\n{response}")
                 return False
         except Exception as e:
             self.logger.error(f"Deregistration error: {e}")

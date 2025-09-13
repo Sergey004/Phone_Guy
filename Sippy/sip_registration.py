@@ -1,4 +1,4 @@
-from enum import Enum, IntEnum
+﻿from enum import Enum, IntEnum
 from threading import Timer, Lock
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 from Sippy.thread_utils import acquired_lock_and_unblocked_socket
@@ -1056,7 +1056,7 @@ class SIPClient:
             + f"{request.headers['CSeq']['method']}\r\n"
         )
         response += f"Contact: {request.headers['Contact']}\r\n"
-        response += f"User-Agent: pyVoIP {pyVoIP.__version__}\r\n"
+        response += f"User-Agent: Sippy {pyVoIP.__version__}\r\n"
         response += 'Warning: 399 GS "Unable to accept call"\r\n'
         response += f"Allow: {(', '.join(pyVoIP.SIPCompatibleMethods))}\r\n"
         response += "Content-Length: 0\r\n\r\n"
@@ -1153,7 +1153,7 @@ class SIPClient:
         regRequest += f'Allow: {(", ".join(pyVoIP.SIPCompatibleMethods))}\r\n'
         regRequest += "Max-Forwards: 70\r\n"
         regRequest += "Allow-Events: org.3gpp.nwinitdereg\r\n"
-        regRequest += f"User-Agent: pyVoIP {pyVoIP.__version__}\r\n"
+        regRequest += f"User-Agent: Sippy {pyVoIP.__version__}\r\n"
         # Supported: 100rel, replaces, from-change, gruu
         regRequest += (
             "Expires: "
@@ -1195,7 +1195,7 @@ class SIPClient:
             + f'"<urn:uuid:{self.urnUUID}>"\r\n'
         )
         subRequest += "Max-Forwards: 70\r\n"
-        subRequest += f"User-Agent: pyVoIP {pyVoIP.__version__}\r\n"
+        subRequest += f"User-Agent: Sippy {pyVoIP.__version__}\r\n"
         subRequest += f"Expires: {self.default_expires * 2}\r\n"
         subRequest += "Event: message-summary\r\n"
         subRequest += "Accept: application/simple-message-summary"
@@ -1244,7 +1244,7 @@ class SIPClient:
         regRequest += f'Allow: {(", ".join(pyVoIP.SIPCompatibleMethods))}\r\n'
         regRequest += "Max-Forwards: 70\r\n"
         regRequest += "Allow-Events: org.3gpp.nwinitdereg\r\n"
-        regRequest += f"User-Agent: pyVoIP {pyVoIP.__version__}\r\n"
+        regRequest += f"User-Agent: Sippy {pyVoIP.__version__}\r\n"
         regRequest += (
             "Expires: "
             + f"{self.default_expires if not deregister else 0}\r\n"
@@ -1287,7 +1287,7 @@ class SIPClient:
         )
         response += f"Contact: {request.headers['Contact']}\r\n"
         # TODO: Add Supported
-        response += f"User-Agent: pyVoIP {pyVoIP.__version__}\r\n"
+        response += f"User-Agent: Sippy {pyVoIP.__version__}\r\n"
         response += 'Warning: 399 GS "Unable to accept call"\r\n'
         response += f"Allow: {(', '.join(pyVoIP.SIPCompatibleMethods))}\r\n"
         response += "Content-Length: 0\r\n\r\n"
@@ -1319,7 +1319,7 @@ class SIPClient:
             f"CSeq: {request.headers['CSeq']['check']} "
             + f"{request.headers['CSeq']['method']}\r\n"
         )
-        okResponse += f"User-Agent: pyVoIP {pyVoIP.__version__}\r\n"
+        okResponse += f"User-Agent: Sippy {pyVoIP.__version__}\r\n"
         okResponse += f"Allow: {(', '.join(pyVoIP.SIPCompatibleMethods))}\r\n"
         okResponse += "Content-Length: 0\r\n\r\n"
 
@@ -1350,7 +1350,7 @@ class SIPClient:
         )
         regRequest += f"Contact: {request.headers['Contact']}\r\n"
         # TODO: Add Supported
-        regRequest += f"User-Agent: pyVoIP {pyVoIP.__version__}\r\n"
+        regRequest += f"User-Agent: Sippy {pyVoIP.__version__}\r\n"
         regRequest += f"Allow: {(', '.join(pyVoIP.SIPCompatibleMethods))}\r\n"
         regRequest += "Content-Length: 0\r\n\r\n"
 
@@ -1383,8 +1383,8 @@ class SIPClient:
         # Generate body first for content length
         body = "v=0\r\n"
         # TODO: Check IPv4/IPv6
-        body += f"o=pyVoIP {sess_id} {int(sess_id)+2} IN IP4 {self.myIP}\r\n"
-        body += f"s=pyVoIP {pyVoIP.__version__}\r\n"
+        body += f"o=Sippy {sess_id} {int(sess_id)+2} IN IP4 {self.myIP}\r\n"
+        body += f"s=Sippy {pyVoIP.__version__}\r\n"
         # TODO: Check IPv4/IPv6
         body += f"c=IN IP4 {self.myIP}\r\n"
         body += "t=0 0\r\n"
@@ -1422,7 +1422,7 @@ class SIPClient:
             + f"<sip:{self.username}@{self.myIP}:{self.myPort}>\r\n"
         )
         # TODO: Add Supported
-        regRequest += f"User-Agent: pyVoIP {pyVoIP.__version__}\r\n"
+        regRequest += f"User-Agent: Sippy {pyVoIP.__version__}\r\n"
         regRequest += f"Allow: {(', '.join(pyVoIP.SIPCompatibleMethods))}\r\n"
         regRequest += "Content-Type: application/sdp\r\n"
         regRequest += f"Content-Length: {len(body)}\r\n\r\n"
@@ -1459,8 +1459,8 @@ class SIPClient:
         # Generate body first for content length
         body = "v=0\r\n"
         # TODO: Check IPv4/IPv6
-        body += f"o=pyVoIP {sess_id} {int(sess_id)+2} IN IP4 {self.myIP}\r\n"
-        body += f"s=pyVoIP {pyVoIP.__version__}\r\n"
+        body += f"o=Sippy {sess_id} {int(sess_id)+2} IN IP4 {self.myIP}\r\n"
+        body += f"s=Sippy {pyVoIP.__version__}\r\n"
         body += f"c=IN IP4 {self.myIP}\r\n"  # TODO: Check IPv4/IPv6
         body += "t=0 0\r\n"
         for x in ms:
@@ -1497,7 +1497,7 @@ class SIPClient:
         invRequest += f"CSeq: {self.inviteCounter.next()} INVITE\r\n"
         invRequest += f"Allow: {(', '.join(pyVoIP.SIPCompatibleMethods))}\r\n"
         invRequest += "Content-Type: application/sdp\r\n"
-        invRequest += f"User-Agent: pyVoIP {pyVoIP.__version__}\r\n"
+        invRequest += f"User-Agent: Sippy {pyVoIP.__version__}\r\n"
         invRequest += f"Content-Length: {len(body)}\r\n\r\n"
         invRequest += body
 
@@ -1539,7 +1539,7 @@ class SIPClient:
             "Contact: "
             + f"<sip:{self.username}@{self.myIP}:{self.myPort}>\r\n"
         )
-        byeRequest += f"User-Agent: pyVoIP {pyVoIP.__version__}\r\n"
+        byeRequest += f"User-Agent: Sippy {pyVoIP.__version__}\r\n"
         byeRequest += f"Allow: {(', '.join(pyVoIP.SIPCompatibleMethods))}\r\n"
         byeRequest += "Content-Length: 0\r\n\r\n"
 
@@ -1567,7 +1567,7 @@ class SIPClient:
         ackMessage += f"From: {request.headers['From']['raw']};tag={tag}\r\n"
         ackMessage += f"Call-ID: {request.headers['Call-ID']}\r\n"
         ackMessage += f"CSeq: {request.headers['CSeq']['check']} ACK\r\n"
-        ackMessage += f"User-Agent: pyVoIP {pyVoIP.__version__}\r\n"
+        ackMessage += f"User-Agent: Sippy {pyVoIP.__version__}\r\n"
         ackMessage += "Content-Length: 0\r\n\r\n"
 
         return ackMessage
@@ -1915,3 +1915,4 @@ class SIPClient:
                 resp = self.s.recv(8192)
             response = SIPMessage(resp)
         return response
+
