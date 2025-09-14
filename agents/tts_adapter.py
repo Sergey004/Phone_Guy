@@ -3,7 +3,7 @@ import logging
 import httpx
 import ffmpeg
 
-from Sippy.sipclient import SIPClient
+from Sippy.SIP import SIPClient
 
 class TTSAdapter:
     def __init__(self, config: dict, logger: logging.Logger):

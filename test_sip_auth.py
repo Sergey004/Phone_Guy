@@ -3,7 +3,7 @@ import time
 import json
 import sys
 
-from Sippy.sipclient import SIPClient
+from Sippy.SIP import SIPClient
 
 # Configure logging
 logging.basicConfig(
