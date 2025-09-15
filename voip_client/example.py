@@ -29,7 +29,7 @@ def main():
     client.start()
     
     logging.info("Starting outgoing call...")
-    call = client.make_call("sip:1001@192.168.1.176")
+    call = client.make_call("sip:2335584@192.168.1.176")
     
     # Live audio capture from microphone
     p = pyaudio.PyAudio()

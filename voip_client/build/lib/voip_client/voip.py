@@ -10,8 +10,6 @@ from .sip import SipClient, SipMessage
 from .rtp import RtpSession
 from .audio import AudioProcessor
 from .config import DEFAULT_RTP_PORT_RANGE, AUDIO_FRAME_SIZE, CODEC_PCMU
-import pyaudio
-import time
 
 class CallState:
     """

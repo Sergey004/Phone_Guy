@@ -1,7 +1,6 @@
 README.md
 setup.py
-tests/test_rtp.py
-tests/test_sip.py
+tests/__init__.py
 voip_client/__init__.py
 voip_client/audio.py
 voip_client/config.py
@@ -13,3 +12,6 @@ voip_client.egg-info/SOURCES.txt
 voip_client.egg-info/dependency_links.txt
 voip_client.egg-info/requires.txt
 voip_client.egg-info/top_level.txt
+voip_client/tests/__init__.py
+voip_client/tests/test_rtp.py
+voip_client/tests/test_sip.py
