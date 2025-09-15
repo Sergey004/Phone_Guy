@@ -6,12 +6,14 @@ Handles call state transitions and coordination between SIP, RTP, and audio comp
 import threading
 import logging
 import re
+import time
+import pyaudio
+import queue
+import secrets
 from .sip import SipClient, SipMessage
 from .rtp import RtpSession
 from .audio import AudioProcessor
 from .config import DEFAULT_RTP_PORT_RANGE, AUDIO_FRAME_SIZE, CODEC_PCMU
-import pyaudio
-import time
 
 class CallState:
     """
@@ -38,9 +40,13 @@ class Call:
         self.audio_processor = AudioProcessor(codec=CODEC_PCMU)
         self.lock = threading.Lock()
         self.call_id = None
-        self.to_tag = None  # remote tag extracted from 200 OK
-        self.playback_thread = None
-        self.playback_stream = None
+        self.to_tag = None
+        self.invite_message = None
+        self.remote_addr = None
+        self.local_tag = None
+        self.remote_tag = None
+        self._rtp_playback_thread = None
+        self._rtp_playback_running = False
 
     def generate_sdp(self):
         rtp_port = self.rtp_port_range[0]
@@ -54,21 +60,44 @@ a=rtpmap:0 PCMU/8000
 """
         return sdp
 
+    def _start_rtp_playback(self):
+        """Start background thread to pull RTP payloads and play them via AudioProcessor."""
+        if not self.rtp_session:
+            return
+        if self._rtp_playback_thread and self._rtp_playback_thread.is_alive():
+            return
+        self._rtp_playback_running = True
+        def loop():
+            logging.info("RTP playback thread started")
+            while self._rtp_playback_running and self.state == CallState.ANSWERED:
+                try:
+                    frame = self.rtp_session.get_audio(timeout=0.1)
+                    if frame:
+                        # frame is encoded payload (e.g., PCMU). Decode+play.
+                        self.audio_processor.add_audio_frame(frame)
+                except Exception as e:
+                    logging.error(f"RTP playback loop error: {e}")
+            logging.info("RTP playback thread exiting")
+        self._rtp_playback_thread = threading.Thread(target=loop, name="rtp_playback")
+        self._rtp_playback_thread.daemon = True
+        self._rtp_playback_thread.start()
+
+    def _stop_rtp_playback(self):
+        self._rtp_playback_running = False
+        if self._rtp_playback_thread and self._rtp_playback_thread.is_alive():
+            self._rtp_playback_thread.join(timeout=1.0)
+            self._rtp_playback_thread = None
+
     def start(self):
-        """
-        Start the call (for outgoing calls).
-        """
         with self.lock:
             self.state = CallState.DIALING
             sdp = self.generate_sdp()
             response = self.sip_client.invite(self.sip_uri, sdp, call_id=self.call_id)
             if response and response.status_code == '200':
-                # Extract To tag from 200 OK for dialog
                 to_header = response.headers.get('To', '')
                 m = re.search(r';tag=([^;>\s]+)', to_header)
-                if m:
-                    self.to_tag = m.group(1)
-                # Parse SDP from response body
+                self.remote_tag = m.group(1) if m else ''
+                self.local_tag = self.sip_client.from_tag
                 remote_ip = None
                 remote_port = None
                 if response.body:
@@ -83,68 +112,75 @@ a=rtpmap:0 PCMU/8000
                 if remote_ip and remote_port:
                     logging.info(f"Creating RTP session with local_ip={self.local_ip}, local_port={self.rtp_port_range[0]}, remote_ip={remote_ip}, remote_port={remote_port}")
                     self.rtp_session = RtpSession(self.local_ip, self.rtp_port_range[0], remote_ip, remote_port)
-                # Send ACK with proper tags and original INVITE CSeq
-                self.sip_client.ack(self.sip_uri, self.call_id, self.to_tag, self.sip_client.from_tag)
+                self.sip_client.ack(self.sip_uri, self.call_id, self.remote_tag, self.local_tag)
                 self.state = CallState.ANSWERED
                 self.audio_processor.start()
-                self._start_playback()
+                self._start_rtp_playback()
             elif response and response.status_code in ['100', '180', '183']:
-                # Handle provisional responses
                 pass
 
     def answer(self):
-        """
-        Answer an incoming call (placeholder: actual 200 OK handling not implemented).
-        """
-        with self.lock:
-            self.state = CallState.ANSWERED
-            # In a full implementation, we would send 200 OK with SDP here and wait for remote ACK.
-            self.audio_processor.start()
-            self._start_playback()
+        if self.state != CallState.IDLE or not self.invite_message or not self.remote_addr:
+            return
+        # Generate local tag
+        self.local_tag = secrets.token_hex(8)
+        # Extract remote tag from From
+        from_header = self.invite_message.headers.get('From', '')
+        m = re.search(r';tag=([^;>\s]+)', from_header)
+        self.remote_tag = m.group(1) if m else ''
+        # Parse remote SDP
+        remote_ip = None
+        remote_port = None
+        if self.invite_message.body:
+            for line in self.invite_message.body.splitlines():
+                line = line.strip()
+                if line.startswith('c=IN IP4 '):
+                    remote_ip = line.split(' ')[2]
+                elif line.startswith('m=audio '):
+                    remote_port = int(line.split(' ')[1])
+        if not remote_ip or not remote_port:
+            logging.error("No valid SDP in INVITE")
+            return
+        # Generate local SDP
+        sdp = self.generate_sdp()
+        # Build headers
+        headers = {
+            "Via": self.invite_message.headers["Via"],
+            "From": self.invite_message.headers["From"],
+            "To": self.invite_message.headers["To"] + f";tag={self.local_tag}",
+            "Call-ID": self.call_id,
+            "CSeq": self.invite_message.headers["CSeq"],
+            "Contact": f"<sip:{self.sip_client.username}@{self.local_ip}:{self.local_port}>",
+            "User-Agent": "Python VoIP Client"
+        }
+        self.sip_client.send_response("200", "OK", headers, self.remote_addr, body=sdp)
+        # Create RTP session
+        self.rtp_session = RtpSession(self.local_ip, self.rtp_port_range[0], remote_ip, remote_port)
+        self.state = CallState.ANSWERED
+        self.audio_processor.start()
+        self._start_rtp_playback()
+    def reject(self):
+        if self.state != CallState.IDLE or not self.invite_message or not self.remote_addr:
+            return
+        headers = {
+            "Via": self.invite_message.headers["Via"],
+            "From": self.invite_message.headers["From"],
+            "To": self.invite_message.headers["To"] + ";tag=" + secrets.token_hex(8),
+            "Call-ID": self.call_id,
+            "CSeq": self.invite_message.headers["CSeq"],
+            "User-Agent": "Python VoIP Client"
+        }
+        self.sip_client.send_response("486", "Busy Here", headers, self.remote_addr)
+        self.state = CallState.ENDED
 
     def hangup(self):
-        """
-        Terminate the call.
-        """
         with self.lock:
             self.state = CallState.ENDED
-            self.sip_client.bye(self.call_id, self.sip_uri, self.to_tag)
+            self.sip_client.bye(self.call_id, self.sip_uri, self.local_tag, self.remote_tag)
+            self._stop_rtp_playback()
             self.audio_processor.stop()
             if self.rtp_session:
                 self.rtp_session.stop()
-            if self.playback_stream:
-                self.playback_stream.stop_stream()
-                self.playback_stream.close()
-            if self.playback_thread and self.playback_thread.is_alive():
-                self.playback_thread.join()
-
-    def receive_audio(self):
-        """
-        Generator to yield received PCM audio frames from RTP.
-        """
-        while self.state == CallState.ANSWERED and self.rtp_session:
-            payload = self.rtp_session.get_audio(timeout=0.02)
-            if payload:
-                yield self.audio_processor.decode_pcm(payload)
-            else:
-                time.sleep(0.02)
-
-    def _start_playback(self):
-        self.playback_thread = threading.Thread(target=self._playback_loop)
-        self.playback_thread.daemon = True
-        self.playback_thread.start()
-    def _playback_loop(self):
-        self.playback_stream = self.audio_processor.pyaudio.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=self.audio_processor.sample_rate,
-            output=True,
-            frames_per_buffer=AUDIO_FRAME_SIZE
-        )
-        for pcm in self.receive_audio():
-            self.playback_stream.write(pcm)
-        self.playback_stream.stop_stream()
-        self.playback_stream.close()
 
     def send_audio(self, audio_data):
         """
@@ -156,6 +192,14 @@ a=rtpmap:0 PCMU/8000
         if self.rtp_session:
             self.rtp_session.send_audio(encoded)
 
+    def receive_audio(self):
+        """
+        Receive PCM audio frames.
+        """
+        if self.state != CallState.ANSWERED:
+            return
+        return self.audio_processor.get_audio_frame()
+
 class VoIPClient:
     """
     Main VoIP client with call management.
@@ -165,9 +209,13 @@ class VoIPClient:
         self.local_ip = local_ip
         self.local_port = local_port
         self.rtp_port_range = rtp_port_range
+        self.pending_responses = {}
+        self.sip_client.owner = self
         self.calls = []
         self.incoming_call_callback = None
         self.running = False
+        # Pause flag to avoid racing receives during blocking transactions (invite)
+        self._pause_receive = False
 
     def start(self):
         """
@@ -190,38 +238,66 @@ class VoIPClient:
         self.sip_client.transport.close()
 
     def _sip_receive_loop(self):
-        """
-        Background thread for receiving SIP messages.
-        """
         while self.running:
             try:
                 data, addr = self.sip_client.transport.receive()
                 message = SipMessage.from_string(data)
+                if message.status_code is not None:  # it's a response
+                    call_id = message.headers.get('Call-ID')
+                    cseq = message.headers.get('CSeq')
+                    if call_id and cseq:
+                        cseq_parts = cseq.split()
+                        if len(cseq_parts) == 2:
+                            cseq_num, cseq_method = cseq_parts
+                            key = (call_id, cseq_num, cseq_method)
+                            if key in self.pending_responses:
+                                self.pending_responses[key].put(message)
+                                continue
+                # Handle requests
                 if message.method == "INVITE":
-                    self._handle_incoming_invite(message)
+                    self._handle_incoming_invite(message, addr)
                 elif message.method == "BYE":
-                    self._handle_bye(message)
+                    self._handle_bye(message, addr)
+                else:
+                    pass
             except Exception as e:
                 logging.error(f"SIP receive error: {e}")
 
-    def _handle_incoming_invite(self, invite_message):
-        # Create a new call object for the incoming INVITE
-        sip_uri = invite_message.headers.get("From", "")
+    def _handle_incoming_invite(self, message, addr):
+        sip_uri = message.headers.get("From", "")
         call = Call(self.sip_client, sip_uri, self.local_ip, self.local_port, self.rtp_port_range)
-        # Capture the Call-ID to maintain dialog
-        call.call_id = invite_message.headers.get("Call-ID")
+        call.call_id = message.headers.get("Call-ID")
+        call.invite_message = message
+        call.remote_addr = addr
+        headers = {
+            "Via": message.headers["Via"],
+            "From": message.headers["From"],
+            "To": message.headers["To"] + ";tag=" + secrets.token_hex(8),
+            "Call-ID": call.call_id,
+            "CSeq": message.headers["CSeq"],
+            "User-Agent": "Python VoIP Client"
+        }
+        self.sip_client.send_response("180", "Ringing", headers, addr)
         self.calls.append(call)
         if self.incoming_call_callback:
             self.incoming_call_callback(call)
         else:
             logging.info("Incoming call received, but no handler is set.")
 
-    def _handle_bye(self, bye_message):
-        # Find the relevant call and end it
-        call_id = bye_message.headers.get("Call-ID")
+    def _handle_bye(self, message, addr):
+        call_id = message.headers.get("Call-ID")
         for call in self.calls:
             if call.call_id == call_id:
                 call.hangup()
+                headers = {
+                    "Via": message.headers["Via"],
+                    "From": message.headers["From"],
+                    "To": message.headers["To"],
+                    "Call-ID": call_id,
+                    "CSeq": message.headers["CSeq"],
+                    "User-Agent": "Python VoIP Client"
+                }
+                self.sip_client.send_response("200", "OK", headers, addr)
                 break
 
     def make_call(self, sip_uri):
@@ -231,7 +307,12 @@ class VoIPClient:
         call = Call(self.sip_client, sip_uri, self.local_ip, self.local_port, self.rtp_port_range)
         call.call_id = f"{self.sip_client.cseq}@{self.local_ip}"
         self.calls.append(call)
-        call.start()
+        # Pause background receive loop during blocking INVITE transaction
+        self._pause_receive = True
+        try:
+            call.start()
+        finally:
+            self._pause_receive = False
         return call
 
     def on_incoming_call(self, callback):

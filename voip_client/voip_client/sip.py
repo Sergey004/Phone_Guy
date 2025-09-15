@@ -10,6 +10,7 @@ import time
 import re
 import logging
 import secrets
+import queue
 from .config import DEFAULT_SIP_PORT
 
 class SipTransport:
@@ -134,41 +135,41 @@ class SipClient:
         self.last_invite_cseq = None
 
     def register(self):
-        """
-        Send REGISTER request to SIP server with retry handling.
-        """
-        while True:
-            uri = f"sip:{self.server}"
-            headers = {
-                "Via": f"SIP/2.0/UDP {self.local_ip}:{self.local_port};branch=z9hG4bK{self.cseq}",
-                "From": f"<sip:{self.username}@{self.server}>;tag={self.from_tag}",
-                "To": f"<sip:{self.username}@{self.server}>",
-                "Call-ID": f"{self.cseq}@{self.local_ip}",
-                "CSeq": f"{self.cseq} REGISTER",
-                "Contact": f"<sip:{self.username}@{self.local_ip}:{self.local_port}>",
-                "Max-Forwards": "70",
-                "User-Agent": "Python VoIP Client",
-                "Content-Length": "0"
-            }
-            message = SipMessage(method="REGISTER", uri=uri, headers=headers)
-            self.transport.send(message.to_string(), (self.server, self.port))
-            self.cseq += 1
-
-            # Wait for response
-            data, addr = self.transport.receive()
-            response = SipMessage.from_string(data)
-            logging.info(f"REGISTER response: {response.status_code} {response.reason}")
-
-            if response.status_code == '200':
-                # Registration successful
+        uri = f"sip:{self.server}"
+        headers = {
+            "Via": f"SIP/2.0/UDP {self.local_ip}:{self.local_port};branch=z9hG4bK{self.cseq}",
+            "From": f"<sip:{self.username}@{self.server}>;tag={self.from_tag}",
+            "To": f"<sip:{self.username}@{self.server}>",
+            "Call-ID": f"{self.cseq}@{self.local_ip}",
+            "CSeq": f"{self.cseq} REGISTER",
+            "Contact": f"<sip:{self.username}@{self.local_ip}:{self.local_port}>",
+            "Max-Forwards": "70",
+            "User-Agent": "Python VoIP Client",
+            "Content-Length": "0"
+        }
+        call_id = headers["Call-ID"]
+        key = (call_id, str(self.cseq), "REGISTER")
+        self.owner.pending_responses[key] = queue.Queue()
+        message = SipMessage(method="REGISTER", uri=uri, headers=headers)
+        self.transport.send(message.to_string(), (self.server, self.port))
+        self.cseq += 1
+        start_time = time.time()
+        timeout = 10
+        response = None
+        while time.time() - start_time < timeout and not response:
+            try:
+                response = self.owner.pending_responses[key].get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if response.status_code == "200":
+                del self.owner.pending_responses[key]
                 return
-            elif response.status_code == '401' and response.headers.get("WWW-Authenticate"):
-                # Process digest auth and resend REGISTER with Authorization
+            elif response.status_code == "401" and response.headers.get("WWW-Authenticate"):
                 auth_header = response.headers["WWW-Authenticate"]
-                realm_match = re.search(r'realm="([^"]+)"', auth_header)
-                nonce_match = re.search(r'nonce="([^"]+)"', auth_header)
+                realm_match = re.search(r'realm=\"([^\"]+)\"', auth_header)
+                nonce_match = re.search(r'nonce=\"([^\"]+)\"', auth_header)
                 qop = None
-                qop_match = re.search(r'qop="?([^"]+)"?', auth_header, re.IGNORECASE)
+                qop_match = re.search(r'qop=\"?([^\"]+)\"?', auth_header, re.IGNORECASE)
                 if qop_match:
                     qop_opt = qop_match.group(1)
                     qop = qop_opt.split(',')[0].strip()
@@ -177,7 +178,6 @@ class SipClient:
                     nonce = nonce_match.group(1)
                     self.auth_realm = realm
                     self.auth_nonce = nonce
-                    # Build Authorization and resend
                     nc_value = format(self.nc_count, '08x')
                     cnonce = secrets.token_hex(8)
                     digest_response = generate_digest_challenge_response(
@@ -196,40 +196,29 @@ class SipClient:
                         auth_params.append("qop=" + qop)
                         auth_params.append(f"nc={nc_value}")
                         auth_params.append(f"cnonce=\"{cnonce}\"")
-                    headers_auth = {
-                        "Via": f"SIP/2.0/UDP {self.local_ip}:{self.local_port};branch=z9hG4bK{self.cseq}",
-                        "From": f"<sip:{self.username}@{self.server}>;tag={self.from_tag}",
-                        "To": f"<sip:{self.username}@{self.server}>",
-                        "Call-ID": f"{self.cseq}@{self.local_ip}",
-                        "CSeq": f"{self.cseq} REGISTER",
-                        "Contact": f"<sip:{self.username}@{self.local_ip}:{self.local_port}>",
-                        "Max-Forwards": "70",
-                        "User-Agent": "Python VoIP Client",
-                        "Authorization": "Digest " + ", ".join(auth_params),
-                        "Content-Length": "0"
-                    }
-                    self.nc_count += 1
+                    headers_auth = headers.copy()
+                    headers_auth["CSeq"] = f"{self.cseq} REGISTER"
+                    headers_auth["Authorization"] = "Digest " + ", ".join(auth_params)
+                    new_key = (call_id, str(self.cseq), "REGISTER")
+                    self.owner.pending_responses[new_key] = queue.Queue()
                     message2 = SipMessage(method="REGISTER", uri=uri, headers=headers_auth)
                     self.transport.send(message2.to_string(), (self.server, self.port))
                     self.cseq += 1
-
-                    # Wait for final response after auth
-                    data2, addr2 = self.transport.receive()
-                    response2 = SipMessage.from_string(data2)
-                    logging.info(f"REGISTER (auth) response: {response2.status_code} {response2.reason}")
-                    if response2.status_code == '200':
-                        return
-                    else:
-                        logging.error(f"Registration failed after auth with status {response2.status_code}")
-                        return
+                    self.nc_count += 1
+                    key = new_key
+                    response = None
+                    continue
                 else:
-                    # If no auth header, break to avoid infinite loop
                     logging.error("401 Unauthorized but no WWW-Authenticate header")
+                    del self.owner.pending_responses[key]
                     return
             else:
-                # Other errors
                 logging.error(f"Registration failed with status {response.status_code}")
+                del self.owner.pending_responses[key]
                 return
+        logging.info("REGISTER timed out")
+        if key in self.owner.pending_responses:
+            del self.owner.pending_responses[key]
 
     def ack(self, sip_uri, call_id, to_tag, from_tag):
         headers = {
@@ -248,31 +237,9 @@ class SipClient:
         self.transport.send(message.to_string(), (self.server, self.port))
         # Do NOT increment self.cseq for ACK to 2xx
 
-    def bye(self, call_id, sip_uri, to_tag):
-        headers = {
-            "Via": f"SIP/2.0/UDP {self.local_ip}:{self.local_port};branch=z9hG4bK{self.cseq}",
-            "From": f"<sip:{self.username}@{self.server}>;tag={self.from_tag}",
-            "To": f"<{sip_uri}>;tag={to_tag}",
-            "Call-ID": call_id,
-            "CSeq": f"{self.cseq} BYE",
-            "Max-Forwards": "70",
-            "User-Agent": "Python VoIP Client",
-            "Content-Length": "0"
-        }
-        uri = sip_uri
-        message = SipMessage(method="BYE", uri=uri, headers=headers)
-        self.transport.send(message.to_string(), (self.server, self.port))
-        self.cseq += 1
-
-        # Wait for final response
-        data, addr = self.transport.receive()
-        response = SipMessage.from_string(data)
-        logging.info(f"BYE response: {response.status_code} {response.reason}")
-
     def invite(self, sip_uri, sdp=None, call_id=None):
         start_time = time.time()
-        timeout = 10  # seconds
-        
+        timeout = 10
         content_length = str(len(sdp.encode('utf-8'))) if sdp else "0"
         headers = {
             "Via": f"SIP/2.0/UDP {self.local_ip}:{self.local_port};branch=z9hG4bK{self.cseq}",
@@ -287,27 +254,29 @@ class SipClient:
         }
         if sdp:
             headers["Content-Type"] = "application/sdp"
-            message = SipMessage(method="INVITE", uri=sip_uri, headers=headers, body=sdp)
-        else:
-            message = SipMessage(method="INVITE", uri=sip_uri, headers=headers)
+        call_id = headers["Call-ID"]
         self.last_invite_cseq = self.cseq
+        key = (call_id, str(self.last_invite_cseq), "INVITE")
+        self.owner.pending_responses[key] = queue.Queue()
+        message = SipMessage(method="INVITE", uri=sip_uri, headers=headers, body=sdp)
         self.transport.send(message.to_string(), (self.server, self.port))
         self.cseq += 1
-
-        while time.time() - start_time < timeout:
+        response = None
+        while time.time() - start_time < timeout and not response:
             try:
-                data, addr = self.transport.receive()
-                response = SipMessage.from_string(data)
-
-                if response.status_code in ['100', '180', '183']:
-                    continue
-                elif response.status_code == '401' and response.headers.get("WWW-Authenticate"):
-                    # Process digest auth (WWW-Authenticate)
+                response = self.owner.pending_responses[key].get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if response.status_code in ['100', '180', '183']:
+                response = None
+                continue
+            elif response.status_code == '401':
+                if response.headers.get("WWW-Authenticate"):
                     auth_header = response.headers["WWW-Authenticate"]
-                    realm_match = re.search(r'realm="([^"]+)"', auth_header)
-                    nonce_match = re.search(r'nonce="([^"]+)"', auth_header)
+                    realm_match = re.search(r'realm=\"([^\"]+)\"', auth_header)
+                    nonce_match = re.search(r'nonce=\"([^\"]+)\"', auth_header)
                     qop = None
-                    qop_match = re.search(r'qop="?([^\"]+)"?', auth_header, re.IGNORECASE)
+                    qop_match = re.search(r'qop=\"?([^\"]+)\"?', auth_header, re.IGNORECASE)
                     if qop_match:
                         qop_opt = qop_match.group(1)
                         qop = qop_opt.split(',')[0].strip()
@@ -316,7 +285,6 @@ class SipClient:
                         nonce = nonce_match.group(1)
                         self.auth_realm = realm
                         self.auth_nonce = nonce
-                        # Re-send INVITE with Authorization
                         nc_value = format(self.nc_count, '08x')
                         cnonce = secrets.token_hex(8)
                         digest_response = generate_digest_challenge_response(
@@ -337,14 +305,22 @@ class SipClient:
                             auth_params.append(f"cnonce=\"{cnonce}\"")
                         headers["Authorization"] = "Digest " + ", ".join(auth_params)
                         self.nc_count += 1
-                        # Recalculate Content-Length in case body changed
                         headers["Content-Length"] = str(len(sdp.encode('utf-8'))) if sdp else "0"
+                        headers["CSeq"] = f"{self.cseq} INVITE"
+                        new_key = (call_id, str(self.cseq), "INVITE")
+                        self.owner.pending_responses[new_key] = queue.Queue()
                         message = SipMessage(method="INVITE", uri=sip_uri, headers=headers, body=sdp if sdp else None)
                         self.transport.send(message.to_string(), (self.server, self.port))
                         self.cseq += 1
-                        continue  # wait for next response
-                elif response.status_code == '407' and response.headers.get("Proxy-Authenticate"):
-                    # Process digest auth (Proxy-Authenticate) and send Proxy-Authorization
+                        key = new_key
+                        response = None
+                        continue
+                    else:
+                        logging.error("401 Unauthorized but no WWW-Authenticate header")
+                        del self.owner.pending_responses[key]
+                        return None
+            elif response.status_code == '407':
+                if response.headers.get("Proxy-Authenticate"):
                     auth_header = response.headers["Proxy-Authenticate"]
                     realm_match = re.search(r'realm=\"([^\"]+)\"', auth_header)
                     nonce_match = re.search(r'nonce=\"([^\"]+)\"', auth_header)
@@ -379,16 +355,66 @@ class SipClient:
                         headers["Proxy-Authorization"] = "Digest " + ", ".join(auth_params)
                         self.nc_count += 1
                         headers["Content-Length"] = str(len(sdp.encode('utf-8'))) if sdp else "0"
+                        headers["CSeq"] = f"{self.cseq} INVITE"
+                        new_key = (call_id, str(self.cseq), "INVITE")
+                        self.owner.pending_responses[new_key] = queue.Queue()
                         message = SipMessage(method="INVITE", uri=sip_uri, headers=headers, body=sdp if sdp else None)
                         self.transport.send(message.to_string(), (self.server, self.port))
                         self.cseq += 1
+                        key = new_key
+                        response = None
                         continue
-                else:
-                    # Final response (200 OK, 4xx, etc.)
-                    logging.info(f"INVITE final response: {response.status_code} {response.reason}")
-                    return response
-            except socket.timeout:
-                continue
+                    else:
+                        logging.error("407 Proxy Authentication Required but no Proxy-Authenticate header")
+                        del self.owner.pending_responses[key]
+                        return None
+        if response:
+            logging.info(f"INVITE final response: {response.status_code} {response.reason}")
+            del self.owner.pending_responses[key]
+            return response
+        else:
+            logging.info("INVITE timed out")
+            if key in self.owner.pending_responses:
+                del self.owner.pending_responses[key]
 
-        logging.info("INVITE timed out")
-        return None
+def bye(self, call_id, sip_uri, from_tag, to_tag):
+    headers = {
+        "Via": f"SIP/2.0/UDP {self.local_ip}:{self.local_port};branch=z9hG4bK{self.cseq}",
+        "From": f"<sip:{self.username}@{self.server}>;tag={from_tag}",
+        "To": f"<{sip_uri}>;tag={to_tag}",
+        "Call-ID": call_id,
+        "CSeq": f"{self.cseq} BYE",
+        "Max-Forwards": "70",
+        "User-Agent": "Python VoIP Client",
+        "Content-Length": "0"
+    }
+    uri = sip_uri
+    key = (call_id, str(self.cseq), "BYE")
+    self.owner.pending_responses[key] = queue.Queue()
+    message = SipMessage(method="BYE", uri=uri, headers=headers)
+    self.transport.send(message.to_string(), (self.server, self.port))
+    self.cseq += 1
+    start_time = time.time()
+    timeout = 5
+    response = None
+    while time.time() - start_time < timeout and not response:
+        try:
+            response = self.owner.pending_responses[key].get(timeout=0.5)
+        except queue.Empty:
+            continue
+    if response:
+        logging.info(f"BYE response: {response.status_code} {response.reason}")
+    else:
+        logging.info("BYE timed out")
+    if key in self.owner.pending_responses:
+        del self.owner.pending_responses[key]
+
+
+    def send_response(self, status_code, reason, headers, dest_address, body=None):
+        if body:
+            headers["Content-Length"] = str(len(body.encode('utf-8')))
+            headers["Content-Type"] = "application/sdp"
+        else:
+            headers["Content-Length"] = "0"
+        message = SipMessage(status_code=status_code, reason=reason, headers=headers, body=body)
+        self.transport.send(message.to_string(), dest_address)
