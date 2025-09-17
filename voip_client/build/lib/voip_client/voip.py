@@ -182,6 +182,14 @@ a=rtpmap:0 PCMU/8000
             if self.rtp_session:
                 self.rtp_session.stop()
 
+    def terminate(self):
+        with self.lock:
+            self.state = CallState.ENDED
+            self._stop_rtp_playback()
+            self.audio_processor.stop()
+            if self.rtp_session:
+                self.rtp_session.stop()
+
     def send_audio(self, audio_data):
         """
         Send PCM audio data for transmission.
@@ -288,7 +296,7 @@ class VoIPClient:
         call_id = message.headers.get("Call-ID")
         for call in self.calls:
             if call.call_id == call_id:
-                call.hangup()
+                call.terminate()
                 headers = {
                     "Via": message.headers["Via"],
                     "From": message.headers["From"],

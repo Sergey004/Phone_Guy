@@ -52,8 +52,9 @@ class AudioProcessor:
             rate=self.sample_rate,
             input=False,
             output=True,
-            frames_per_buffer=AUDIO_FRAME_SIZE
+            frames_per_buffer=2 * AUDIO_FRAME_SIZE
         )
+        stream.start_stream()
         try:
             while self.running:
                 try:

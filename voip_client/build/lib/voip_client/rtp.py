@@ -70,44 +70,56 @@ class JitterBuffer:
     def __init__(self, max_delay_ms=60, sample_rate=8000):
         self.max_delay_ms = max_delay_ms
         self.sample_rate = sample_rate
-        self.buffer = queue.PriorityQueue()
+        self.buffer = {}
         self.lock = threading.Lock()
         self.last_sequence = None
-        self.last_timestamp = None
+        self.next_sequence = 0
+        self.max_buffer_size = int(max_delay_ms / 1000 * sample_rate / (AUDIO_FRAME_SIZE / 2)) # Max packets to buffer
+        self.frame_duration = AUDIO_FRAME_SIZE / sample_rate # Duration of one audio frame in seconds
 
     def add_packet(self, packet):
         """
-        Add RTP packet to jitter buffer.
+        Add RTP packet to jitter buffer, handling out-of-order packets.
         """
         with self.lock:
-            # Calculate expected sequence number
-            if self.last_sequence is None:
-                self.last_sequence = packet.sequence
-            else:
-                # Handle sequence number wraparound
-                expected = (self.last_sequence + 1) % 65536
-                if packet.sequence != expected:
-                    logging.warning(f"Packet loss detected: expected {expected}, got {packet.sequence}")
-                
-            self.last_sequence = packet.sequence
-            self.buffer.put((packet.sequence, packet))
+            if self.next_sequence is None:
+                self.next_sequence = packet.sequence
 
-    def get_next_packet(self):
+            self.buffer[packet.sequence] = packet
+
+            # Remove old packets to prevent buffer overflow
+            if len(self.buffer) > self.max_buffer_size * 2: # Allow some leeway
+                min_seq = min(self.buffer.keys())
+                if min_seq < self.next_sequence - self.max_buffer_size:
+                    del self.buffer[min_seq]
+
+    def get_next_packet(self, timeout=0.05):
         """
-        Get next packet in sequence order (blocking).
+        Get next packet in sequence order (blocking with timeout).
+        If packet is missing, return silence.
         """
-        with self.lock:
-            if self.buffer.empty():
-                return None
-            return self.buffer.get()[1]
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            with self.lock:
+                if self.next_sequence in self.buffer:
+                    packet = self.buffer.pop(self.next_sequence)
+                    self.next_sequence = (self.next_sequence + 1) % 65536
+                    return packet
+            time.sleep(0.001) # Small sleep to prevent busy-waiting
+
+        # If packet is still not found after timeout, assume loss and return silence
+        logging.warning(f"Packet with sequence {self.next_sequence} not received, inserting silence.")
+        self.next_sequence = (self.next_sequence + 1) % 65536
+        return RtpPacket(payload=b'\x00' * AUDIO_FRAME_SIZE) # Return silence
 
     def clear(self):
         """
         Clear all packets from buffer.
         """
         with self.lock:
-            while not self.buffer.empty():
-                self.buffer.get()
+            self.buffer.clear()
+            self.last_sequence = None
+            self.next_sequence = None
 
 class RtpSession:
     """
@@ -166,7 +178,7 @@ class RtpSession:
         """
         Get next decoded audio frame from jitter buffer.
         """
-        packet = self.jitter_buffer.get_next_packet()
+        packet = self.jitter_buffer.get_next_packet(timeout=timeout)
         if packet:
             return packet.payload
         return None

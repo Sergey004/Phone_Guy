@@ -6,6 +6,7 @@ setup(
     packages=find_packages(),
     install_requires=[
         "pyaudio",
+        "ffmpeg-python"
     ],
     description="A Python library for SIP and RTP VoIP communication",
     author="Your Name",

@@ -94,7 +94,7 @@ a=rtpmap:0 PCMU/8000
             sdp = self.generate_sdp()
             response = self.sip_client.invite(self.sip_uri, sdp, call_id=self.call_id)
             if response and response.status_code == '200':
-                to_header = response.headers.get('To', '')
+                to_header = str(response.headers.get('To', ''))
                 m = re.search(r';tag=([^;>\s]+)', to_header)
                 self.remote_tag = m.group(1) if m else ''
                 self.local_tag = self.sip_client.from_tag
@@ -116,6 +116,11 @@ a=rtpmap:0 PCMU/8000
                 self.state = CallState.ANSWERED
                 self.audio_processor.start()
                 self._start_rtp_playback()
+                # Start microphone capture thread
+                self._mic_capture_running = True
+                self._mic_capture_thread = threading.Thread(target=self._capture_microphone)
+                self._mic_capture_thread.daemon = True
+                self._mic_capture_thread.start()
             elif response and response.status_code in ['100', '180', '183']:
                 pass
 
@@ -125,7 +130,7 @@ a=rtpmap:0 PCMU/8000
         # Generate local tag
         self.local_tag = secrets.token_hex(8)
         # Extract remote tag from From
-        from_header = self.invite_message.headers.get('From', '')
+        from_header = str(self.invite_message.headers.get('From', ''))
         m = re.search(r';tag=([^;>\s]+)', from_header)
         self.remote_tag = m.group(1) if m else ''
         # Parse remote SDP
@@ -159,6 +164,12 @@ a=rtpmap:0 PCMU/8000
         self.state = CallState.ANSWERED
         self.audio_processor.start()
         self._start_rtp_playback()
+        # Start microphone capture thread
+        self._mic_capture_running = True
+        self._mic_capture_thread = threading.Thread(target=self._capture_microphone)
+        self._mic_capture_thread.daemon = True
+        self._mic_capture_thread.start()
+
     def reject(self):
         if self.state != CallState.IDLE or not self.invite_message or not self.remote_addr:
             return
@@ -176,7 +187,21 @@ a=rtpmap:0 PCMU/8000
     def hangup(self):
         with self.lock:
             self.state = CallState.ENDED
+            self._mic_capture_running = False
+            if self._mic_capture_thread and self._mic_capture_thread.is_alive():
+                self._mic_capture_thread.join(timeout=1.0)
             self.sip_client.bye(self.call_id, self.sip_uri, self.local_tag, self.remote_tag)
+            self._stop_rtp_playback()
+            self.audio_processor.stop()
+            if self.rtp_session:
+                self.rtp_session.stop()
+
+    def terminate(self):
+        with self.lock:
+            self.state = CallState.ENDED
+            self._mic_capture_running = False
+            if self._mic_capture_thread and self._mic_capture_thread.is_alive():
+                self._mic_capture_thread.join(timeout=1.0)
             self._stop_rtp_playback()
             self.audio_processor.stop()
             if self.rtp_session:
@@ -200,11 +225,31 @@ a=rtpmap:0 PCMU/8000
             return
         return self.audio_processor.get_audio_frame()
 
+    def _capture_microphone(self):
+        p = pyaudio.PyAudio()
+        stream = p.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=8000,
+            input=True,
+            frames_per_buffer=320
+        )
+        while self._mic_capture_running and self.state == CallState.ANSWERED:
+            try:
+                data = stream.read(320)
+                self.send_audio(data)
+            except Exception as e:
+                logging.error(f"Microphone capture error: {e}")
+                break
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+
 class VoIPClient:
     """
     Main VoIP client with call management.
     """
-    def __init__(self, server, port=5060, username=None, password=None, local_ip="0.0.0.0", local_port=5060, rtp_port_range=(10000, 20000)):
+    def __init__(self, server, port=5060, username=None, password=None, local_ip="0.0.0.0", local_port=5060, rtp_port_range=DEFAULT_RTP_PORT_RANGE):
         self.sip_client = SipClient(server, port, username, password, local_ip, local_port)
         self.local_ip = local_ip
         self.local_port = local_port
@@ -288,7 +333,7 @@ class VoIPClient:
         call_id = message.headers.get("Call-ID")
         for call in self.calls:
             if call.call_id == call_id:
-                call.hangup()
+                call.terminate()
                 headers = {
                     "Via": message.headers["Via"],
                     "From": message.headers["From"],

@@ -23,6 +23,7 @@ class SipTransport:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind((local_ip, local_port))
         self.running = True
+        self.sock.settimeout(2.0)  # Increased timeout for better reliability
 
     def send(self, message, dest_address):
         self.sock.sendto(message.encode(), dest_address)
@@ -57,18 +58,46 @@ class SipMessage:
         if not lines:
             return None
         request_line = lines[0].split()
-        # Parse headers up to the first empty line
-        headers = {}
-        body_str = ''
+        # Process headers with continuation lines
+        merged_headers = []
+        current = None
         idx_blank = None
         for i in range(1, len(lines)):
             line = lines[i]
-            if line == '':
+            if line.strip() == '':
                 idx_blank = i
                 break
-            if ':' in line:
-                key, value = line.split(':', 1)
-                headers[key.strip()] = value.strip()
+            if line.startswith(' ') or line.startswith('\t'):
+                if current is not None:
+                    current += line
+                else:
+                    current = line
+            else:
+                if current is not None:
+                    merged_headers.append(current)
+                current = line
+        if current is not None:
+            merged_headers.append(current)
+
+        parsed_headers = {}
+        for header_line in merged_headers:
+            if ':' in header_line:
+                key, value = header_line.split(':', 1)
+                key = key.strip()
+                value = value.strip()
+                if key == 'Via':
+                    parsed_headers[key] = ViaHeader(value)
+                elif key == 'From':
+                    parsed_headers[key] = FromHeader(value)
+                elif key == 'To':
+                    parsed_headers[key] = ToHeader(value)
+                elif key == 'Contact':
+                    parsed_headers[key] = ContactHeader(value)
+                else:
+                    parsed_headers[key] = value
+        headers = parsed_headers
+
+        body_str = ''
         if idx_blank is not None and idx_blank + 1 < len(lines):
             body_str = '\r\n'.join(lines[idx_blank + 1:]).rstrip('\r\n')
         # Determine if response or request
@@ -88,7 +117,12 @@ class SipMessage:
         start_line = ''
         if self.method:
             start_line = f"{self.method} {self.uri} SIP/2.0"
-        header_lines = [f"{key}: {value}" for key, value in self.headers.items()]
+        header_lines = []
+        for key, value in self.headers.items():
+            if isinstance(value, (ViaHeader, FromHeader, ToHeader, ContactHeader)):
+                header_lines.append(f"{key}: {value}")
+            else:
+                header_lines.append(f"{key}: {value}")
         # Compose with correct CRLF CRLF between headers and body
         message = ''
         if start_line:
@@ -100,6 +134,161 @@ class SipMessage:
         if self.body:
             message += self.body
         return message
+
+class ViaHeader:
+    def __init__(self, header_str):
+        # Parse the Via header string
+        parts = header_str.split(';')
+        transport_line = parts[0].strip()
+        tokens = transport_line.split()
+        if len(tokens) < 2:
+            self.transport = "UDP"
+            self.host = None
+            self.port = None
+        else:
+            proto_parts = tokens[0].split('/')
+            if len(proto_parts) >= 3:
+                self.transport = proto_parts[2]
+            else:
+                self.transport = "UDP"
+            host_port = tokens[1]
+            if ':' in host_port:
+                self.host, self.port = host_port.split(':', 1)
+            else:
+                self.host = host_port
+                self.port = None
+        self.params = {}
+        for param in parts[1:]:
+            if '=' in param:
+                k, v = param.split('=', 1)
+                self.params[k.strip()] = v.strip()
+    
+    def __str__(self):
+        transport_line = f"SIP/2.0/{self.transport} {self.host}:{self.port}"
+        params = []
+        for k, v in self.params.items():
+            params.append(f"{k}={v}")
+        return f"{transport_line};{';'.join(params)}"
+
+class FromHeader:
+    def __init__(self, header_str):
+        self.display_name = None
+        self.uri = None
+        self.params = {}
+        if header_str.startswith('"'):
+            end_quote = header_str.find('"', 1)
+            if end_quote != -1:
+                self.display_name = header_str[1:end_quote]
+                rest = header_str[end_quote+1:].strip()
+            else:
+                rest = header_str
+        else:
+            rest = header_str
+        if rest.startswith('<') and '>' in rest:
+            start_bracket = rest.find('<')
+            end_bracket = rest.find('>', start_bracket)
+            self.uri = rest[start_bracket+1:end_bracket]
+            params_str = rest[end_bracket+1:].strip()
+        else:
+            self.uri = rest
+            params_str = ''
+        for param in params_str.split(';'):
+            if '=' in param:
+                k, v = param.split('=', 1)
+                self.params[k.strip()] = v.strip().strip('"')
+            else:
+                self.params[param.strip()] = True
+    def __str__(self):
+        parts = []
+        if self.display_name:
+            parts.append(f'"{self.display_name}"')
+        parts.append(f'<{self.uri}>')
+        for k, v in self.params.items():
+            if v is True:
+                parts.append(k)
+            else:
+                parts.append(f"{k}={v}")
+        return ' '.join(parts)
+
+class ToHeader:
+    def __init__(self, header_str):
+        self.display_name = None
+        self.uri = None
+        self.params = {}
+        if header_str.startswith('"'):
+            end_quote = header_str.find('"', 1)
+            if end_quote != -1:
+                self.display_name = header_str[1:end_quote]
+                rest = header_str[end_quote+1:].strip()
+            else:
+                rest = header_str
+        else:
+            rest = header_str
+        if rest.startswith('<') and '>' in rest:
+            start_bracket = rest.find('<')
+            end_bracket = rest.find('>', start_bracket)
+            self.uri = rest[start_bracket+1:end_bracket]
+            params_str = rest[end_bracket+1:].strip()
+        else:
+            self.uri = rest
+            params_str = ''
+        for param in params_str.split(';'):
+            if '=' in param:
+                k, v = param.split('=', 1)
+                self.params[k.strip()] = v.strip().strip('"')
+            else:
+                self.params[param.strip()] = True
+    def __str__(self):
+        parts = []
+        if self.display_name:
+            parts.append(f'"{self.display_name}"')
+        parts.append(f'<{self.uri}>')
+        for k, v in self.params.items():
+            if v is True:
+                parts.append(k)
+            else:
+                parts.append(f"{k}={v}")
+        return ' '.join(parts)
+
+class ContactHeader:
+    def __init__(self, header_str):
+        self.display_name = None
+        self.uri = None
+        self.params = {}
+        if header_str.startswith('"'):
+            end_quote = header_str.find('"', 1)
+            if end_quote != -1:
+                self.display_name = header_str[1:end_quote]
+                rest = header_str[end_quote+1:].strip()
+            else:
+                rest = header_str
+        else:
+            rest = header_str
+        if rest.startswith('<') and '>' in rest:
+            start_bracket = rest.find('<')
+            end_bracket = rest.find('>', start_bracket)
+            self.uri = rest[start_bracket+1:end_bracket]
+            params_str = rest[end_bracket+1:].strip()
+        else:
+            self.uri = rest
+            params_str = ''
+        for param in params_str.split(';'):
+            if '=' in param:
+                k, v = param.split('=', 1)
+                self.params[k.strip()] = v.strip().strip('"')
+            else:
+                self.params[param.strip()] = True
+    def __str__(self):
+        parts = []
+        if self.display_name:
+            parts.append(f'"{self.display_name}"')
+        parts.append(f'<{self.uri}>')
+        for k, v in self.params.items():
+            if v is True:
+                parts.append(k)
+            else:
+                parts.append(f"{k}={v}")
+        return ' '.join(parts)
 
 def generate_digest_challenge_response(username, password, realm, nonce, method, uri, qop=None, nc=None, cnonce=None):
     """
@@ -408,7 +597,6 @@ def bye(self, call_id, sip_uri, from_tag, to_tag):
         logging.info("BYE timed out")
     if key in self.owner.pending_responses:
         del self.owner.pending_responses[key]
-
 
     def send_response(self, status_code, reason, headers, dest_address, body=None):
         if body:
