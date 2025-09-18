@@ -242,7 +242,17 @@ class RtpSession:
                 packet = RtpPacket.from_bytes(data)
                 self.jitter_buffer.add_packet(packet)
                 logging.debug(f"Received RTP packet seq={packet.sequence} size={len(packet.payload)} from {addr}")
+            except OSError as e:
+                # Suppress expected errors during shutdown on Windows (WinError 10038)
+                if not self.running:
+                    break
+                if getattr(e, 'winerror', None) == 10038:
+                    logging.info("RTP socket closed, receive loop exiting")
+                    break
+                logging.error(f"RTP receive error: {e}")
             except Exception as e:
+                if not self.running:
+                    break
                 logging.error(f"RTP receive error: {e}")
 
     def get_audio(self, timeout=0.1):
@@ -259,4 +269,9 @@ class RtpSession:
         Stop RTP session.
         """
         self.running = False
-        self.sock.close()
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+        if self.receive_thread and self.receive_thread.is_alive():
+            self.receive_thread.join(timeout=1.0)

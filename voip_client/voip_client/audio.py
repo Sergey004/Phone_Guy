@@ -79,9 +79,9 @@ class AudioProcessor:
         Encode PCM data to selected codec (PCMU or PCMA).
         """
         if self.codec == CODEC_PCMU:
-            return audioop.lin2ulaw(pcm_data, 1)
+            return audioop.lin2ulaw(pcm_data, 2)
         elif self.codec == CODEC_PCMA:
-            return audioop.lin2alaw(pcm_data, 1)
+            return audioop.lin2alaw(pcm_data, 2)
         else:
             raise ValueError(f"Unsupported codec: {self.codec}")
 
@@ -90,9 +90,9 @@ class AudioProcessor:
         Decode encoded data (PCMU or PCMA) to PCM.
         """
         if self.codec == CODEC_PCMU:
-            return audioop.ulaw2lin(encoded_data, 1)
+            return audioop.ulaw2lin(encoded_data, 2)
         elif self.codec == CODEC_PCMA:
-            return audioop.alaw2lin(encoded_data, 1)
+            return audioop.alaw2lin(encoded_data, 2)
         else:
             raise ValueError(f"Unsupported codec: {self.codec}")
 

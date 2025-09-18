@@ -3,8 +3,12 @@ import wave
 import time
 import argparse
 import socket
+import os
+import tempfile
 
-from voip_client.config import CODEC_PCMU
+import ffmpeg
+
+from voip_client.config import CODEC_PCMU, AUDIO_FRAME_SIZE
 from voip_client.voip import CallState, VoIPClient
 
 logging.basicConfig(
@@ -13,7 +17,7 @@ logging.basicConfig(
 )
 
 def handle_incoming_call(call):
-    logging.info(f"Incoming call from {call.remote_uri}")
+    logging.info(f"Incoming call from {getattr(call, 'remote_uri', 'unknown')}")
     call.answer()
     logging.info("Call answered")
     time.sleep(5)  # Keep the call open for 5 seconds
@@ -31,6 +35,33 @@ def get_local_ip():
     finally:
         s.close()
     return IP
+
+
+def _convert_to_pcm16_mono_8k(input_path: str) -> str:
+    """Convert arbitrary audio file to 8kHz mono 16-bit PCM WAV using ffmpeg.
+    Returns path to a temporary WAV file.
+    """
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+    tmp_path = tmp.name
+    tmp.close()
+    try:
+        (
+            ffmpeg
+            .input(input_path)
+            .output(tmp_path, acodec='pcm_s16le', ac=1, ar='8000', loglevel='error')
+            .overwrite_output()
+            .run()
+        )
+        logging.info(f"Converted '{input_path}' to PCM16 mono 8kHz WAV at '{tmp_path}'")
+        return tmp_path
+    except Exception as e:
+        # Clean up on failure
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        raise RuntimeError(f"ffmpeg conversion failed: {e}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="VoIP Client Example")
@@ -51,19 +82,23 @@ def main():
 
     client = VoIPClient(
         args.server,
-        5060,
+        args.port,
         username=args.username,
         password=args.password,
+        local_ip=local_ip,
+        local_port=args.local_port,
         rtp_port_range=rtp_port_range,
     )
     client.start()
 
+    temp_converted = None
     try:
         call = client.make_call(args.callee)
         if not call:
             logging.error("Failed to create call")
             return
 
+        # Wait until answered or ended
         while call.state != CallState.ANSWERED:
             if call.state == CallState.ENDED:
                 logging.error("Call ended before it was answered")
@@ -72,22 +107,53 @@ def main():
 
         logging.info(f"Playing audio file: {args.audio_file} and sending to RTP stream")
         try:
-            with wave.open(args.audio_file, 'rb') as f:
-                frames = f.getnframes()
-                data = f.readframes(frames)
+            audio_path = args.audio_file
+            # First, try to open with wave — this only supports PCM/Extensible.
+            try:
+                with wave.open(audio_path, 'rb') as f:
+                    nchannels = f.getnchannels()
+                    sampwidth = f.getsampwidth()
+                    framerate = f.getframerate()
+                    needs_convert = (nchannels != 1 or sampwidth != 2 or framerate != 8000)
+            except wave.Error as we:
+                logging.warning(f"wave cannot open '{audio_path}' ({we}), attempting ffmpeg conversion to PCM16 mono 8kHz...")
+                temp_converted = _convert_to_pcm16_mono_8k(audio_path)
+                audio_path = temp_converted
+                needs_convert = False  # Already converted
 
-            call.write_audio(data)
+            if needs_convert:
+                logging.warning("Expected 8kHz mono 16-bit PCM WAV; converting with ffmpeg...")
+                temp_converted = _convert_to_pcm16_mono_8k(audio_path)
+                audio_path = temp_converted
 
-            stop = time.time() + (frames / 8000)
+            with wave.open(audio_path, 'rb') as f:
+                # At this point the file should be 8kHz mono s16le WAV
+                # 20ms = 160 samples = 320 bytes per frame at 8kHz 16-bit mono
+                while True:
+                    data = f.readframes(AUDIO_FRAME_SIZE)
+                    if not data:
+                        break
+                    # send PCM bytes; Call will encode to PCMU
+                    call.send_audio(data)
+                    time.sleep(0.02)
 
-            while time.time() <= stop and call.state == CallState.ANSWERED:
-                time.sleep(0.1)
+            # Keep call for a short tail to flush buffers
+            tail = time.time() + 0.5
+            while time.time() < tail and call.state == CallState.ANSWERED:
+                time.sleep(0.05)
 
         except Exception as e:
             logging.error(f"Error playing audio file: {e}")
 
     finally:
-        client.stop()
+        try:
+            client.stop()
+        finally:
+            if temp_converted and os.path.exists(temp_converted):
+                try:
+                    os.unlink(temp_converted)
+                except Exception:
+                    pass
 
 if __name__ == "__main__":
     main()

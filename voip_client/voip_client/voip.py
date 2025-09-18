@@ -10,6 +10,7 @@ import time
 import pyaudio
 import queue
 import secrets
+import socket
 from .sip import SipClient, SipMessage
 from .rtp import RtpSession
 from .audio import AudioProcessor
@@ -94,9 +95,20 @@ a=rtpmap:0 PCMU/8000
             sdp = self.generate_sdp()
             response = self.sip_client.invite(self.sip_uri, sdp, call_id=self.call_id)
             if response and response.status_code == '200':
-                to_header = str(response.headers.get('To', ''))
-                m = re.search(r';tag=([^;>\s]+)', to_header)
-                self.remote_tag = m.group(1) if m else ''
+                # Extract remote and local tags robustly
+                to_header_obj = response.headers.get('To')
+                remote_tag = ''
+                try:
+                    params = getattr(to_header_obj, 'params', None)
+                    if isinstance(params, dict):
+                        remote_tag = params.get('tag', '') or ''
+                except Exception:
+                    pass
+                if not remote_tag:
+                    to_header_str = str(to_header_obj) if to_header_obj is not None else ''
+                    m = re.search(r'(?:;|\s)tag=([^;>\s]+)', to_header_str)
+                    remote_tag = m.group(1) if m else ''
+                self.remote_tag = remote_tag
                 self.local_tag = self.sip_client.from_tag
                 remote_ip = None
                 remote_port = None
@@ -149,10 +161,15 @@ a=rtpmap:0 PCMU/8000
         # Generate local SDP
         sdp = self.generate_sdp()
         # Build headers
+        orig_to = self.invite_message.headers["To"]
+        if hasattr(orig_to, 'uri'):
+            to_value = f"<{orig_to.uri}>;tag={self.local_tag}"
+        else:
+            to_value = str(orig_to) + f";tag={self.local_tag}"
         headers = {
             "Via": self.invite_message.headers["Via"],
             "From": self.invite_message.headers["From"],
-            "To": self.invite_message.headers["To"] + f";tag={self.local_tag}",
+            "To": to_value,
             "Call-ID": self.call_id,
             "CSeq": self.invite_message.headers["CSeq"],
             "Contact": f"<sip:{self.sip_client.username}@{self.local_ip}:{self.local_port}>",
@@ -173,10 +190,13 @@ a=rtpmap:0 PCMU/8000
     def reject(self):
         if self.state != CallState.IDLE or not self.invite_message or not self.remote_addr:
             return
+        # Properly format To header with tag
+        orig_to = self.invite_message.headers["To"]
+        to_value = f"<{orig_to.uri}>;tag=" + secrets.token_hex(8) if hasattr(orig_to, 'uri') else str(orig_to) + ";tag=" + secrets.token_hex(8)
         headers = {
             "Via": self.invite_message.headers["Via"],
             "From": self.invite_message.headers["From"],
-            "To": self.invite_message.headers["To"] + ";tag=" + secrets.token_hex(8),
+            "To": to_value,
             "Call-ID": self.call_id,
             "CSeq": self.invite_message.headers["CSeq"],
             "User-Agent": "Python VoIP Client"
@@ -273,12 +293,13 @@ class VoIPClient:
         """
         Start SIP registration and listen for incoming calls.
         """
-        self.sip_client.register()
+        # Start receive loop BEFORE REGISTER so responses are captured
         self.running = True
-        # Start SIP receive thread
-        self.sip_receive_thread = threading.Thread(target=self._sip_receive_loop)
+        self.sip_receive_thread = threading.Thread(target=self._sip_receive_loop, name="sip_rx")
         self.sip_receive_thread.daemon = True
         self.sip_receive_thread.start()
+        # Perform REGISTER after listener is up
+        self.sip_client.register()
 
     def stop(self):
         """
@@ -305,6 +326,19 @@ class VoIPClient:
                             if key in self.pending_responses:
                                 self.pending_responses[key].put(message)
                                 continue
+                            # Fallback: some servers reply with a different CSeq number than sent (e.g., incremented)
+                            # Try to route by Call-ID + Method only when an exact key is not found.
+                            fallback_delivered = False
+                            for pending_key in list(self.pending_responses.keys()):
+                                try:
+                                    if pending_key[0] == call_id and pending_key[2] == cseq_method:
+                                        self.pending_responses[pending_key].put(message)
+                                        fallback_delivered = True
+                                        break
+                                except Exception:
+                                    continue
+                            if fallback_delivered:
+                                continue
                 # Handle requests
                 if message.method == "INVITE":
                     self._handle_incoming_invite(message, addr)
@@ -312,6 +346,9 @@ class VoIPClient:
                     self._handle_bye(message, addr)
                 else:
                     pass
+            except socket.timeout:
+                # Normal idle receive timeout; avoid noisy logs
+                continue
             except Exception as e:
                 logging.error(f"SIP receive error: {e}")
 
@@ -321,10 +358,13 @@ class VoIPClient:
         call.call_id = message.headers.get("Call-ID")
         call.invite_message = message
         call.remote_addr = addr
+        # Properly format To header with new tag for provisional response
+        to_hdr = message.headers["To"]
+        ring_to_value = f"<{to_hdr.uri}>;tag=" + secrets.token_hex(8) if hasattr(to_hdr, 'uri') else str(to_hdr) + ";tag=" + secrets.token_hex(8)
         headers = {
             "Via": message.headers["Via"],
             "From": message.headers["From"],
-            "To": message.headers["To"] + ";tag=" + secrets.token_hex(8),
+            "To": ring_to_value,
             "Call-ID": call.call_id,
             "CSeq": message.headers["CSeq"],
             "User-Agent": "Python VoIP Client"
