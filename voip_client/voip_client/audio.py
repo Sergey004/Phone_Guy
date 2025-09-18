@@ -46,13 +46,19 @@ class AudioProcessor:
         Main audio processing loop.
         Only handles playback of PCM frames pushed via add_audio_frame().
         """
+        # Choose a sane playback buffer size independent of RTP packetization
+        if isinstance(AUDIO_FRAME_SIZE, int) and AUDIO_FRAME_SIZE > 0:
+            frames_per_buffer = max(160, 2 * AUDIO_FRAME_SIZE)
+        else:
+            # AUTO or invalid -> use 20 ms (320 samples) buffer for smooth playback
+            frames_per_buffer = 320
         stream = self.pyaudio.open(
             format=pyaudio.paInt16,
             channels=1,
             rate=self.sample_rate,
             input=False,
             output=True,
-            frames_per_buffer=2 * AUDIO_FRAME_SIZE
+            frames_per_buffer=frames_per_buffer
         )
         stream.start_stream()
         try:

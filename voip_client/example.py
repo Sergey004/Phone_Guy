@@ -129,13 +129,18 @@ def main():
             with wave.open(audio_path, 'rb') as f:
                 # At this point the file should be 8kHz mono s16le WAV
                 # 20ms = 160 samples = 320 bytes per frame at 8kHz 16-bit mono
+                # Determine chunk size: if AUDIO_FRAME_SIZE is a positive int, use it; otherwise default to 160 frames (20ms)
+                chunk_frames = AUDIO_FRAME_SIZE if isinstance(AUDIO_FRAME_SIZE, int) and AUDIO_FRAME_SIZE > 0 else 160
                 while True:
-                    data = f.readframes(AUDIO_FRAME_SIZE)
+                    data = f.readframes(chunk_frames)
                     if not data:
                         break
                     # send PCM bytes; Call will encode to PCMU
                     call.send_audio(data)
-                    time.sleep(0.02)
+                    # Sleep to approximate real-time playback: frames_read / 8000 seconds
+                    frames_read = len(data) // 2  # 2 bytes per sample at 16-bit mono
+                    if frames_read > 0:
+                        time.sleep(frames_read / 8000.0)
 
             # Keep call for a short tail to flush buffers
             tail = time.time() + 0.5
