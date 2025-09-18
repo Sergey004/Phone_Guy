@@ -70,9 +70,10 @@ class JitterBuffer:
     A more advanced jitter buffer for RTP packets.
     It uses a priority queue to handle out-of-order packets and adapts to jitter.
     """
-    def __init__(self, max_delay_ms=200, sample_rate=8000):
+    def __init__(self, max_delay_ms=200, sample_rate=8000, auto_adjust=False):
         self.max_delay_ms = max_delay_ms
         self.sample_rate = sample_rate
+        self.auto_adjust = auto_adjust
         self.buffer = queue.PriorityQueue()
         self.lock = threading.Lock()
         self.next_sequence = None
@@ -85,6 +86,33 @@ class JitterBuffer:
         self.packets_late = 0
         self.log_interval = 5  # Log stats every 5 seconds
         self.last_log_time = time.time()
+        self.last_adjust_time = time.time()
+        self.adjust_interval = 1 # Adjust every 1 second
+
+    def _adjust_buffer_delay(self):
+        if not self.auto_adjust:
+            return
+
+        now = time.time()
+        if now - self.last_adjust_time < self.adjust_interval:
+            return
+
+        self.last_adjust_time = now
+
+        # Simple adjustment logic:
+        # If packet loss is high, increase delay to allow more time for packets to arrive.
+        # If buffer is consistently low, decrease delay to reduce latency.
+        # These are heuristic values and might need tuning.
+
+        if self.packets_lost > 0 and self.max_delay_ms < 500:
+            self.max_delay_ms = min(500, self.max_delay_ms + 20)  # Increase by 20ms, max 500ms
+            logging.info(f"JitterBuffer: Increasing max_delay_ms to {self.max_delay_ms} due to packet loss.")
+        elif self.buffer.qsize() < self.max_buffer_size / 2 and self.max_delay_ms > 60:
+            self.max_delay_ms = max(60, self.max_delay_ms - 10)  # Decrease by 10ms, min 60ms
+            logging.info(f"JitterBuffer: Decreasing max_delay_ms to {self.max_delay_ms} due to low buffer.")
+
+        # Reset packet loss counter after adjustment period
+        self.packets_lost = 0
 
     def add_packet(self, packet):
         """
@@ -110,6 +138,7 @@ class JitterBuffer:
                     pass
         
         self._log_stats()
+        self._adjust_buffer_delay()
 
     def get_next_packet(self, timeout=0.05):
         """
@@ -138,6 +167,7 @@ class JitterBuffer:
         self.packets_lost += 1
         logging.warning(f"Packet {self.next_sequence} not received, generating comfort noise (PLC).")
         self._log_stats()
+        self._adjust_buffer_delay()
 
         # Generate PLC payload length based on last good packet or default to 20 ms (160 samples encoded)
         if self.last_good_packet:
@@ -214,7 +244,7 @@ class RtpSession:
         self.recv_thread = None
         self.send_lock = threading.Lock()
         self.recv_lock = threading.Lock()
-        self.jitter_buffer = JitterBuffer(max_delay_ms=60)
+        self.jitter_buffer = JitterBuffer(max_delay_ms=200, auto_adjust=True)
         # AUTO packetization support for G.711 (8kHz, 8-bit per sample)
         self.sample_rate = 8000
         self.bytes_per_ms = self.sample_rate // 1000  # 8 bytes/ms for PCMU/PCMA
