@@ -1,134 +1,93 @@
 import logging
-import pyaudio
-import threading
+import wave
 import time
-import ffmpeg
+import argparse
+import socket
 
 from voip_client.config import CODEC_PCMU
+from voip_client.voip import CallState, VoIPClient
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-from voip_client import VoIPClient
-from voip_client.audio import AudioProcessor
-
 def handle_incoming_call(call):
+    logging.info(f"Incoming call from {call.remote_uri}")
     call.answer()
-    logging.info("Call answered. Starting audio stream...")
-    p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paInt16,
-                    channels=1,
-                    rate=8000,
-                    output=True,
-                    frames_per_buffer=320)
-    processor = AudioProcessor(codec=CODEC_PCMU)
+    logging.info("Call answered")
+    time.sleep(5)  # Keep the call open for 5 seconds
+    call.hangup()
+    logging.info("Call hung up")
+
+def get_local_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        for encoded in call.receive_encoded():
-            pcm = processor.decode_pcm(encoded)
-            stream.write(pcm)
-            call.send_encoded(encoded)
+        # doesn't even have to be reachable
+        s.connect(('8.8.8.8', 1))
+        IP = s.getsockname()[0]
+    except Exception:
+        IP = '127.0.0.1'
     finally:
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
+        s.close()
+    return IP
 
 def main():
+    parser = argparse.ArgumentParser(description="VoIP Client Example")
+    parser.add_argument("--server", required=True, help="SIP server address")
+    parser.add_argument("--port", type=int, default=5060, help="SIP server port")
+    parser.add_argument("--username", required=True, help="SIP username")
+    parser.add_argument("--password", required=True, help="SIP password")
+    parser.add_argument("--local-ip", help="Local IP address (optional, auto-detected if not provided)")
+    parser.add_argument("--local-port", type=int, default=5062, help="Local SIP port")
+    parser.add_argument("--rtp-ports", default="10000-20000", help="RTP port range (e.g., 10000-20000)")
+    parser.add_argument("--callee", required=True, help="SIP URI of the callee")
+    parser.add_argument("--audio-file", required=True, help="Path to the audio file to play")
+    args = parser.parse_args()
+
+    rtp_port_range = tuple(map(int, args.rtp_ports.split('-')))
+
+    local_ip = args.local_ip if args.local_ip else get_local_ip()
+
     client = VoIPClient(
-        server="192.168.1.176",
-        port=5060,
-        username="555533",
-        password="Test1234",
-        local_ip="192.168.1.181",
-        local_port=5062,
-        rtp_port_range=(10000, 20000)
+        args.server,
+        5060,
+        username=args.username,
+        password=args.password,
+        rtp_port_range=rtp_port_range,
     )
-    client.on_incoming_call(handle_incoming_call)
     client.start()
-    
-    logging.info("Starting outgoing call...")
-    call = client.make_call("sip:2335584@192.168.1.176")
-    call.audio_processor.local_playback_enabled = False # Disable local playback
 
-    p = pyaudio.PyAudio()
-    # processor = AudioProcessor(input_stream, output_stream)
-    # processor.local_playback_enabled = False # Disable local playback
-
-    output_stream = p.open(format=pyaudio.paInt16,
-                    channels=1,
-                    rate=8000,
-                    output=True,
-                    frames_per_buffer=320)
-    
-    # Play the test audio file and send it to RTP stream
-    # logging.info(f"Playing audio file: f:\\Test_Phone\\Test_audio.wav and sending to RTP stream")
-    # try:
-    #     process = (
-    #         ffmpeg
-    #         .input("f:\\Test_Phone\\Test_audio.wav")
-    #         .output('pipe:', format='s16le', acodec='pcm_s16le', ac=1, ar=8000)
-    #         .run_async(pipe_stdout=True, pipe_stderr=True)
-    #     )
-
-    #     while call.state == "answered":
-    #         in_bytes = process.stdout.read(320 * 2)  # 16-bit PCM, 2 bytes per sample
-    #         if not in_bytes:
-    #             break
-    #         call.send_audio(in_bytes)
-    #         if call.audio_processor.local_playback_enabled:
-    #             output_stream.write(in_bytes) # Also play locally
-    #     process.wait()
-    # except ffmpeg.Error as e:
-    #     logging.error(f"FFmpeg error: {e.stderr.decode()}")
-    # except Exception as e:
-    #     logging.error(f"Error playing audio file: {e}")
-
-    def playback_loop():
-        while call.state == "answered":
-            encoded_packet = call.rtp_session.get_audio()
-            if encoded_packet:
-                pcm = call.audio_processor.decode_pcm(encoded_packet)
-                if call.audio_processor.local_playback_enabled:
-                    output_stream.write(pcm)
-            else:
-                silence = b'\x00' * 640
-                if call.audio_processor.local_playback_enabled:
-                    output_stream.write(silence)
-                time.sleep(0.02)
-    
-    playback_thread = threading.Thread(target=playback_loop)
-    playback_thread.daemon = True
-    playback_thread.start()
-    # Play the test audio file and send it to RTP stream
-    logging.info(f"Playing audio file: f:\\Test_Phone\\Test_audio.wav and sending to RTP stream")
     try:
-        process = (
-            ffmpeg
-            .input("f:\\Test_Phone\\Test_audio.wav")
-            .output('pipe:', format='s16le', acodec='pcm_s16le', ac=1, ar=8000)
-            .run_async(pipe_stdout=True, pipe_stderr=True)
-        )
+        call = client.make_call(args.callee)
+        if not call:
+            logging.error("Failed to create call")
+            return
 
-        while call.state == "answered":
-            in_bytes = process.stdout.read(320 * 2)  # 16-bit PCM, 2 bytes per sample
-            if not in_bytes:
-                break
-            call.send_audio(in_bytes)
-            if call.audio_processor.local_playback_enabled:
-                output_stream.write(in_bytes) # Also play locally
-            time.sleep(0.04) # Pace the sending to match audio duration
-        process.wait()
-    except ffmpeg.Error as e:
-        logging.error(f"FFmpeg error: {e.stderr.decode()}")
-        logging.error(f"Error playing audio file: {e}")
+        while call.state != CallState.ANSWERED:
+            if call.state == CallState.ENDED:
+                logging.error("Call ended before it was answered")
+                return
+            time.sleep(0.1)
 
-    output_stream.stop_stream()
-    output_stream.close()
-    p.terminate()
-    call.hangup()
-    client.stop()
-    logging.info("Call ended and client stopped.")
+        logging.info(f"Playing audio file: {args.audio_file} and sending to RTP stream")
+        try:
+            with wave.open(args.audio_file, 'rb') as f:
+                frames = f.getnframes()
+                data = f.readframes(frames)
+
+            call.write_audio(data)
+
+            stop = time.time() + (frames / 8000)
+
+            while time.time() <= stop and call.state == CallState.ANSWERED:
+                time.sleep(0.1)
+
+        except Exception as e:
+            logging.error(f"Error playing audio file: {e}")
+
+    finally:
+        client.stop()
 
 if __name__ == "__main__":
     main()

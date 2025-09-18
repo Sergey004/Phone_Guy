@@ -26,10 +26,12 @@ class SipTransport:
         self.sock.settimeout(2.0)  # Increased timeout for better reliability
 
     def send(self, message, dest_address):
+        logging.debug(f"Sending SIP message to {dest_address}:\n{message}")
         self.sock.sendto(message.encode(), dest_address)
 
     def receive(self):
         data, addr = self.sock.recvfrom(4096)
+        logging.debug(f"Received SIP message from {addr}:\n{data.decode()}")
         return data.decode(), addr
 
     def close(self):

@@ -9,6 +9,8 @@ import threading
 import queue
 import time
 import logging
+import random
+import audioop
 from .config import DEFAULT_RTP_PORT_RANGE, AUDIO_FRAME_SIZE
 
 class RtpPacket:
@@ -65,61 +67,128 @@ class RtpPacket:
 
 class JitterBuffer:
     """
-    Basic jitter buffer for RTP packets with 60ms capacity.
+    A more advanced jitter buffer for RTP packets.
+    It uses a priority queue to handle out-of-order packets and adapts to jitter.
     """
-    def __init__(self, max_delay_ms=60, sample_rate=8000):
+    def __init__(self, max_delay_ms=200, sample_rate=8000):
         self.max_delay_ms = max_delay_ms
         self.sample_rate = sample_rate
-        self.buffer = {}
+        self.buffer = queue.PriorityQueue()
         self.lock = threading.Lock()
-        self.last_sequence = None
         self.next_sequence = None
-        self.max_buffer_size = int(max_delay_ms / 1000 * sample_rate / AUDIO_FRAME_SIZE) # Max packets to buffer
-        self.frame_duration = AUDIO_FRAME_SIZE / sample_rate # Duration of one audio frame in seconds
+        self.max_buffer_size = int(max_delay_ms / 1000 * sample_rate / AUDIO_FRAME_SIZE)
+        self.last_good_packet = None
+        # Statistics
+        self.packets_received = 0
+        self.packets_lost = 0
+        self.packets_late = 0
+        self.log_interval = 5  # Log stats every 5 seconds
+        self.last_log_time = time.time()
 
     def add_packet(self, packet):
         """
-        Add RTP packet to jitter buffer, handling out-of-order packets.
+        Add RTP packet to the jitter buffer.
         """
         with self.lock:
+            self.packets_received += 1
             if self.next_sequence is None:
                 self.next_sequence = packet.sequence
 
-            self.buffer[packet.sequence] = packet
+            # Check for late packets
+            if packet.sequence < self.next_sequence:
+                self.packets_late += 1
+                return  # Discard late packet
 
-            # Remove old packets to prevent buffer overflow
-            if len(self.buffer) > self.max_buffer_size * 2: # Allow some leeway
-                min_seq = min(self.buffer.keys())
-                if min_seq < self.next_sequence - self.max_buffer_size:
-                    del self.buffer[min_seq]
+            self.buffer.put((packet.sequence, packet))
+
+            # Basic overflow protection
+            if self.buffer.qsize() > self.max_buffer_size * 2:
+                try:
+                    self.buffer.get_nowait()
+                except queue.Empty:
+                    pass
+        
+        self._log_stats()
 
     def get_next_packet(self, timeout=0.05):
         """
-        Get next packet in sequence order (blocking with timeout).
-        If packet is missing, return silence.
+        Get the next packet in sequence order.
+        If a packet is missing, generate comfort noise (PLC).
         """
         start_time = time.time()
         while time.time() - start_time < timeout:
             with self.lock:
-                if self.next_sequence in self.buffer:
-                    packet = self.buffer.pop(self.next_sequence)
-                    self.next_sequence = (self.next_sequence + 1) % 65536
-                    return packet
-            time.sleep(0.001) # Small sleep to prevent busy-waiting
+                if not self.buffer.empty():
+                    seq, packet = self.buffer.queue[0]
+                    if seq == self.next_sequence:
+                        _, packet = self.buffer.get()
+                        self.next_sequence = (self.next_sequence + 1) % 65536
+                        self.last_good_packet = packet
+                        return packet
+                    elif seq < self.next_sequence:
+                        # Packet is older than what we expect, discard
+                        self.buffer.get()
+                        self.packets_late += 1
+                        continue
+                    # Packet is in the future, wait
+            time.sleep(0.001)
 
-        # If packet is still not found after timeout, assume loss and return silence
-        logging.warning(f"Packet with sequence {self.next_sequence} not received, inserting silence.")
+        # Packet not found, generate comfort noise
+        self.packets_lost += 1
+        logging.warning(f"Packet {self.next_sequence} not received, generating comfort noise (PLC).")
+        self._log_stats()
+
+        # Generate comfort noise payload
+        if self.last_good_packet:
+            # Repeat the last good packet's payload as a simple PLC
+            plc_payload = self.last_good_packet.payload
+        else:
+            # Fallback to silence if no previous packet is available
+            noise_pcm = bytearray(AUDIO_FRAME_SIZE * 2)  # 16-bit PCM
+            plc_payload = audioop.lin2ulaw(bytes(noise_pcm), 2)
+
+
+        next_ts = self.last_good_packet.timestamp + AUDIO_FRAME_SIZE if self.last_good_packet else 0
+        next_ssrc = self.last_good_packet.ssrc if self.last_good_packet else 0
+        payload_type = self.last_good_packet.payload_type if self.last_good_packet else 0
+
+        plc_packet = RtpPacket(
+            payload_type=payload_type,
+            sequence=self.next_sequence,
+            timestamp=next_ts,
+            ssrc=next_ssrc,
+            payload=plc_payload[:AUDIO_FRAME_SIZE]
+        )
+
         self.next_sequence = (self.next_sequence + 1) % 65536
-        return RtpPacket(payload=b'\x00' * AUDIO_FRAME_SIZE) # Return silence
+        # We don't set last_good_packet to the PLC packet
+        return plc_packet
+
+    def _log_stats(self):
+        """
+        Log jitter buffer statistics periodically.
+        """
+        current_time = time.time()
+        if current_time - self.last_log_time > self.log_interval:
+            with self.lock:
+                logging.info(f"JitterBuffer Stats: Received={self.packets_received}, Lost={self.packets_lost}, Late={self.packets_late}, Buffer Size={self.buffer.qsize()}")
+                self.last_log_time = current_time
 
     def clear(self):
         """
-        Clear all packets from buffer.
+        Clear all packets from the buffer and reset stats.
         """
         with self.lock:
-            self.buffer.clear()
-            self.last_sequence = None
+            while not self.buffer.empty():
+                try:
+                    self.buffer.get_nowait()
+                except queue.Empty:
+                    break
             self.next_sequence = None
+            self.last_good_packet = None
+            self.packets_received = 0
+            self.packets_lost = 0
+            self.packets_late = 0
 
 class RtpSession:
     """
@@ -159,7 +228,7 @@ class RtpSession:
                     payload=frame
                 )
                 self.sock.sendto(packet.to_bytes(), (self.remote_ip, self.remote_port))
-                logging.info(f"Sent RTP packet seq={packet.sequence} size={len(packet.payload)} to {self.remote_ip}:{self.remote_port}")
+                logging.debug(f"Sent RTP packet seq={packet.sequence} size={len(packet.payload)} to {self.remote_ip}:{self.remote_port}")
                 self.seq = (self.seq + 1) % 65536
                 self.timestamp += AUDIO_FRAME_SIZE
 
@@ -172,7 +241,7 @@ class RtpSession:
                 data, addr = self.sock.recvfrom(4096)
                 packet = RtpPacket.from_bytes(data)
                 self.jitter_buffer.add_packet(packet)
-                logging.info(f"Received RTP packet seq={packet.sequence} size={len(packet.payload)} from {addr}")
+                logging.debug(f"Received RTP packet seq={packet.sequence} size={len(packet.payload)} from {addr}")
             except Exception as e:
                 logging.error(f"RTP receive error: {e}")
 

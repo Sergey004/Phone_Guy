@@ -186,12 +186,19 @@ a=rtpmap:0 PCMU/8000
 
     def hangup(self):
         with self.lock:
+            if self.state == CallState.ENDED:
+                return
             self.state = CallState.ENDED
-            self._mic_capture_running = False
-            if self._mic_capture_thread and self._mic_capture_thread.is_alive():
-                self._mic_capture_thread.join(timeout=1.0)
-            self.sip_client.bye(self.call_id, self.sip_uri, self.local_tag, self.remote_tag)
+            # Stop threads before sending BYE
             self._stop_rtp_playback()
+            if hasattr(self, '_mic_capture_thread') and self._mic_capture_thread:
+                self._mic_capture_running = False
+                self._mic_capture_thread.join(timeout=1.0)
+
+            # Now send BYE
+            self.sip_client.bye(self.call_id, self.sip_uri, self.local_tag, self.remote_tag)
+            
+            # Clean up resources
             self.audio_processor.stop()
             if self.rtp_session:
                 self.rtp_session.stop()
