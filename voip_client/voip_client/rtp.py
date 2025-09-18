@@ -11,6 +11,9 @@ import time
 import logging
 import random
 import audioop
+import numpy as np
+from vad import EnergyVAD
+
 from .config import DEFAULT_RTP_PORT_RANGE, AUDIO_FRAME_SIZE
 
 class RtpPacket:
@@ -54,6 +57,13 @@ class RtpPacket:
             ssrc=ssrc,
             payload=payload
         )
+
+    def is_rtcp(self):
+        """
+        Checks if the packet is an RTCP packet.
+        RTCP packet types are typically in the range 200-204.
+        """
+        return 200 <= self.payload_type <= 204
 
     def to_bytes(self):
         """
@@ -173,7 +183,7 @@ class JitterBuffer:
         if self.last_good_packet:
             last_len = len(self.last_good_packet.payload)
             payload_type = self.last_good_packet.payload_type
-            next_ts = (self.last_good_packet.timestamp + last_len) % (2**32)
+            next_ts = (self.last_good_packet.timestamp + last_len) % (2**32) if self.last_good_packet.timestamp is not None else 0
             next_ssrc = self.last_good_packet.ssrc
             # Simple PLC: repeat last payload
             plc_payload = self.last_good_packet.payload
@@ -240,11 +250,21 @@ class RtpSession:
         self.seq = random.randint(0, 65535)
         self.timestamp = random.randint(0, 2**32 - 1)
         self.ssrc = random.randint(1, 2**32 - 1)
+
+        # VAD initialization
+        self.vad_enabled = True # Set to False to disable VAD
+        if self.vad_enabled:
+            self.vad = EnergyVAD(sample_rate=8000, frame_length=20, frame_shift=20) # Assuming 8000 Hz and 20ms frames
+        else:
+            self.vad = None
+        self.last_vad_state = False # To track changes in VAD state
+
         self.running = False
         self.recv_thread = None
         self.send_lock = threading.Lock()
         self.recv_lock = threading.Lock()
         self.jitter_buffer = JitterBuffer(max_delay_ms=200, auto_adjust=True)
+
         # AUTO packetization support for G.711 (8kHz, 8-bit per sample)
         self.sample_rate = 8000
         self.bytes_per_ms = self.sample_rate // 1000  # 8 bytes/ms for PCMU/PCMA
@@ -301,6 +321,8 @@ class RtpSession:
                     self.sock.sendto(packet.to_bytes(), (self.remote_ip, self.remote_port))
                     logging.debug(f"Sent RTP packet seq={packet.sequence} size={len(packet.payload)} to {self.remote_ip}:{self.remote_port}")
                     self.seq = (self.seq + 1) % 65536
+                    # Debugging: Check types before timestamp update
+                    logging.debug(f"Before timestamp update: self.timestamp type={type(self.timestamp)}, value={self.timestamp}; len(frame) type={type(len(frame))}, value={len(frame)}")
                     # Timestamp increments by number of audio samples (1 byte == 1 sample for G.711)
                     self.timestamp = (self.timestamp + len(frame)) % (2**32)
 
@@ -340,7 +362,28 @@ class RtpSession:
             try:
                 data, addr = self.sock.recvfrom(4096)
                 packet = RtpPacket.from_bytes(data)
-                self.jitter_buffer.add_packet(packet)
+                if not packet.is_rtcp():
+                    if self.vad_enabled:
+                        audio_data = packet.payload
+                        audio_data_np = np.frombuffer(audio_data, dtype=np.int16)
+                        is_speech = bool(self.vad(audio_data_np)) # Use the callable EnergyVAD object
+                        if is_speech:
+                            self.jitter_buffer.add_packet(packet)
+                            self.last_vad_state = True
+                        elif self.last_vad_state:
+                            # If speech just ended, add a silence packet to mark the end of speech
+                            # This helps in preventing gaps in audio when speech resumes
+                            silence_packet = RtpPacket(payload=b'\x00' * len(audio_data), 
+                                                    sequence=packet.sequence, 
+                                                    timestamp=packet.timestamp if packet.timestamp is not None else 0, 
+                                                    payload_type=packet.payload_type)
+                            self.jitter_buffer.add_packet(silence_packet)
+                            self.last_vad_state = False
+                        # else: # No need for this else, as we discard non-speech if not transitioning
+                        # pass
+                    else:
+                        self.jitter_buffer.add_packet(packet)
+
                 logging.debug(f"Received RTP packet seq={packet.sequence} size={len(packet.payload)} from {addr}")
             except socket.timeout:
                 # Normal idle timeout

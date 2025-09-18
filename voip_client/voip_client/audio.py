@@ -106,8 +106,11 @@ class AudioProcessor:
         """
         Add encoded audio frame (e.g., PCMU/PCMA) to be decoded and played.
         """
-        pcm_frame = self.decode_pcm(frame)
-        self.pcm_queue.put(pcm_frame)
+        if frame is not None:
+            pcm_frame = self.decode_pcm(frame)
+            self.pcm_queue.put(pcm_frame)
+        else:
+            logging.debug("Received None frame in add_audio_frame, skipping.")
 
     def get_audio_frame(self):
         """

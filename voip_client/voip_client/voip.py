@@ -73,9 +73,11 @@ a=rtpmap:0 PCMU/8000
             while self._rtp_playback_running and self.state == CallState.ANSWERED:
                 try:
                     frame = self.rtp_session.get_audio(timeout=0.1)
-                    if frame:
+                    if frame is not None:
                         # frame is encoded payload (e.g., PCMU). Decode+play.
                         self.audio_processor.add_audio_frame(frame)
+                    else:
+                        logging.debug("No audio frame received from RTP session")
                 except Exception as e:
                     logging.error(f"RTP playback loop error: {e}")
             logging.info("RTP playback thread exiting")
