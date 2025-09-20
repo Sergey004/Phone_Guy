@@ -78,9 +78,6 @@ class AudioProcessor:
 
         if self.stream is not None:
             try:
-                # Closing the stream from another thread will usually unblock
-                # a blocking write; catch and ignore errors that occur while
-                # the thread is winding down.
                 try:
                     self.stream.stop_stream()
                 except Exception:
@@ -93,10 +90,17 @@ class AudioProcessor:
                 self.stream = None
 
         if self.audio_thread:
-            # Join with timeout to avoid indefinite blocking
             self.audio_thread.join(timeout=1.0)
             if self.audio_thread.is_alive():
                 logging.warning("AudioProcessor: audio thread did not stop within timeout")
+            self.audio_thread = None
+
+        # Полная очистка PCM-очереди после остановки
+        try:
+            while not self.pcm_queue.empty():
+                self.pcm_queue.get_nowait()
+        except Exception:
+            pass
 
         try:
             self.pyaudio.terminate()

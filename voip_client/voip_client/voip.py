@@ -233,6 +233,12 @@ a=rtpmap:0 PCMU/8000
             
             # Clean up resources
             self.audio_processor.stop()
+            if hasattr(self.audio_processor, 'pcm_queue'):
+                try:
+                    while not self.audio_processor.pcm_queue.empty():
+                        self.audio_processor.pcm_queue.get_nowait()
+                except Exception:
+                    pass
             if self.rtp_session:
                 self.rtp_session.stop()
 
@@ -244,6 +250,12 @@ a=rtpmap:0 PCMU/8000
                 self._mic_capture_thread.join(timeout=1.0)
             self._stop_rtp_playback()
             self.audio_processor.stop()
+            if hasattr(self.audio_processor, 'pcm_queue'):
+                try:
+                    while not self.audio_processor.pcm_queue.empty():
+                        self.audio_processor.pcm_queue.get_nowait()
+                except Exception:
+                    pass
             if self.rtp_session:
                 self.rtp_session.stop()
 
