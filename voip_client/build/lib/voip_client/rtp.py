@@ -9,6 +9,11 @@ import threading
 import queue
 import time
 import logging
+import random
+import audioop
+import numpy as np
+from vad import EnergyVAD
+
 from .config import DEFAULT_RTP_PORT_RANGE, AUDIO_FRAME_SIZE
 
 class RtpPacket:
@@ -53,6 +58,13 @@ class RtpPacket:
             payload=payload
         )
 
+    def is_rtcp(self):
+        """
+        Checks if the packet is an RTCP packet.
+        RTCP packet types are typically in the range 200-204.
+        """
+        return 200 <= self.payload_type <= 204
+
     def to_bytes(self):
         """
         Convert RtpPacket object to raw bytes.
@@ -65,101 +77,316 @@ class RtpPacket:
 
 class JitterBuffer:
     """
-    Basic jitter buffer for RTP packets with 60ms capacity.
+    A more advanced jitter buffer for RTP packets.
+    It uses a priority queue to handle out-of-order packets and adapts to jitter.
     """
-    def __init__(self, max_delay_ms=60, sample_rate=8000):
+    def __init__(self, max_delay_ms=200, sample_rate=8000, auto_adjust=False):
         self.max_delay_ms = max_delay_ms
         self.sample_rate = sample_rate
-        self.buffer = {}
+        self.auto_adjust = auto_adjust
+        self.buffer = queue.PriorityQueue()
         self.lock = threading.Lock()
-        self.last_sequence = None
-        self.next_sequence = 0
-        self.max_buffer_size = int(max_delay_ms / 1000 * sample_rate / (AUDIO_FRAME_SIZE / 2)) # Max packets to buffer
-        self.frame_duration = AUDIO_FRAME_SIZE / sample_rate # Duration of one audio frame in seconds
+        self.next_sequence = None
+        # Capacity based on time window, assuming minimum 10 ms packetization
+        self.max_buffer_size = max(10, int(self.max_delay_ms / 10) + 5)
+        self.last_good_packet = None
+        # Statistics
+        self.packets_received = 0
+        self.packets_lost = 0
+        self.packets_late = 0
+        self.log_interval = 5  # Log stats every 5 seconds
+        self.last_log_time = time.time()
+        self.last_adjust_time = time.time()
+        self.comfort_noise_frame = b'\x00' * 160 # Default to 20ms of silence for G.711
+        self.adjust_interval = 1 # Adjust every 1 second
+
+        # Asynchronous sending
+        self.send_queue = queue.Queue()
+        self.send_thread = None
+        self.send_running = False
+
+    def _send_loop(self):
+        """
+        Background thread for sending RTP packets from the send_queue.
+        """
+        logging.info("RTP send thread started")
+        while self.send_running:
+            try:
+                frame_data = self.send_queue.get(timeout=0.1)
+                if frame_data is None: # Sentinel value to stop the thread
+                    break
+
+                frame, is_auto_packetization = frame_data
+
+                if is_auto_packetization:
+                    # Logic for dynamic packetization
+                    packet = RtpPacket(
+                        payload_type=self.payload_type,
+                        sequence=self.seq,
+                        timestamp=self.timestamp,
+                        ssrc=self.ssrc,
+                        payload=frame
+                    )
+                    self.sock.sendto(packet.to_bytes(), (self.remote_ip, self.remote_port))
+                    logging.debug(f"Sent RTP packet seq={packet.sequence} size={len(packet.payload)} to {self.remote_ip}:{self.remote_port}")
+                    self.seq = (self.seq + 1) % 65536
+                    self.timestamp = (self.timestamp + len(frame)) % (2**32)
+                    logging.debug(f"Before timestamp update: self.timestamp type={type(self.timestamp)}, value={self.timestamp}; len(frame) value={len(frame)}")
+
+                    # Simple backlog-based adaptation
+                    backlog_ms = len(self._tx_buffer) // self.bytes_per_ms
+                    if backlog_ms > 60 and self.packetization_ms < self.max_packetization_ms:
+                        self.packetization_ms = min(self.packetization_ms + 10, self.max_packetization_ms)
+                    elif backlog_ms < 15 and self.packetization_ms > self.min_packetization_ms:
+                        self.packetization_ms = max(self.packetization_ms - 10, self.min_packetization_ms)
+                else:
+                    # Logic for fixed-size packetization
+                    frame_size = AUDIO_FRAME_SIZE
+                    if not isinstance(frame_size, int) or frame_size <= 0:
+                        frame_size = 160
+                    
+                    # Assuming 'frame' here is already a packet-sized chunk
+                    packet = RtpPacket(
+                        payload_type=self.payload_type,
+                        sequence=self.seq,
+                        timestamp=self.timestamp,
+                        ssrc=self.ssrc,
+                        payload=frame
+                    )
+                    self.sock.sendto(packet.to_bytes(), (self.remote_ip, self.remote_port))
+                    logging.debug(f"Sent RTP packet seq={packet.sequence} size={len(packet.payload)} to {self.remote_ip}:{self.remote_port}")
+                    self.seq = (self.seq + 1) % 65536
+                    self.timestamp = (self.timestamp + len(frame)) % (2**32)
+                    logging.debug(f"Before timestamp update: self.timestamp type={type(self.timestamp)}, value={self.timestamp}; len(frame) value={len(frame)}")
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logging.error(f"RTP send loop error: {e}")
+        logging.info("RTP send thread exiting")
+
+    def _adjust_buffer_delay(self):
+        if not self.auto_adjust:
+            return
+
+        now = time.time()
+        if now - self.last_adjust_time < self.adjust_interval:
+            return
+
+        self.last_adjust_time = now
+
+        # Simple adjustment logic:
+        # If packet loss is high, increase delay to allow more time for packets to arrive.
+        # If buffer is consistently low, decrease delay to reduce latency.
+        # These are heuristic values and might need tuning.
+
+        if self.packets_lost > 0 and self.max_delay_ms < 500:
+            self.max_delay_ms = min(500, self.max_delay_ms + 20)  # Increase by 20ms, max 500ms
+            logging.info(f"JitterBuffer: Increasing max_delay_ms to {self.max_delay_ms} due to packet loss.")
+        elif self.buffer.qsize() < self.max_buffer_size / 2 and self.max_delay_ms > 60:
+            self.max_delay_ms = max(60, self.max_delay_ms - 10)  # Decrease by 10ms, min 60ms
+            logging.info(f"JitterBuffer: Decreasing max_delay_ms to {self.max_delay_ms} due to low buffer.")
+
+        # Reset packet loss counter after adjustment period
+        self.packets_lost = 0
 
     def add_packet(self, packet):
         """
-        Add RTP packet to jitter buffer, handling out-of-order packets.
+        Add RTP packet to the jitter buffer.
         """
         with self.lock:
+            self.packets_received += 1
             if self.next_sequence is None:
                 self.next_sequence = packet.sequence
 
-            self.buffer[packet.sequence] = packet
+            # Check for late packets
+            if packet.sequence < self.next_sequence:
+                self.packets_late += 1
+                return  # Discard late packet
 
-            # Remove old packets to prevent buffer overflow
-            if len(self.buffer) > self.max_buffer_size * 2: # Allow some leeway
-                min_seq = min(self.buffer.keys())
-                if min_seq < self.next_sequence - self.max_buffer_size:
-                    del self.buffer[min_seq]
+            self.buffer.put((packet.sequence, packet))
+
+            # Basic overflow protection
+            if self.buffer.qsize() > self.max_buffer_size * 2:
+                try:
+                    self.buffer.get_nowait()
+                except queue.Empty:
+                    pass
+        
+        self._log_stats()
+        self._adjust_buffer_delay()
 
     def get_next_packet(self, timeout=0.05):
         """
-        Get next packet in sequence order (blocking with timeout).
-        If packet is missing, return silence.
+        Get the next packet in sequence order.
+        If a packet is missing, generate comfort noise (PLC).
         """
         start_time = time.time()
         while time.time() - start_time < timeout:
             with self.lock:
-                if self.next_sequence in self.buffer:
-                    packet = self.buffer.pop(self.next_sequence)
-                    self.next_sequence = (self.next_sequence + 1) % 65536
-                    return packet
-            time.sleep(0.001) # Small sleep to prevent busy-waiting
+                if not self.buffer.empty():
+                    seq, packet = self.buffer.queue[0]
+                    if seq == self.next_sequence:
+                        _, packet = self.buffer.get()
+                        self.next_sequence = (self.next_sequence + 1) % 65536
+                        self.last_good_packet = packet
+                        return packet
+                    elif seq < self.next_sequence:
+                        # Packet is older than what we expect, discard
+                        self.buffer.get()
+                        self.packets_late += 1
+                        continue
+                    # Packet is in the future, wait
+            time.sleep(0.001)
 
-        # If packet is still not found after timeout, assume loss and return silence
-        logging.warning(f"Packet with sequence {self.next_sequence} not received, inserting silence.")
+        # Packet not found, generate comfort noise
+        self.packets_lost += 1
+        logging.warning(f"Packet {self.next_sequence} not received, generating comfort noise (PLC).")
+        self._log_stats()
+        self._adjust_buffer_delay()
+
+        # Generate PLC payload length based on last good packet or default to 20 ms (160 samples encoded)
+        if self.last_good_packet:
+            last_len = len(self.last_good_packet.payload)
+            payload_type = self.last_good_packet.payload_type
+            next_ts = (self.last_good_packet.timestamp + last_len) % (2**32) if self.last_good_packet.timestamp is not None else 0
+            next_ssrc = self.last_good_packet.ssrc
+            # Simple PLC: repeat last payload
+            plc_payload = self.last_good_packet.payload
+        else:
+            last_len = 160
+            payload_type = 0
+            next_ts = 0
+            next_ssrc = 0
+            # Silence -> encode zero PCM of size last_len samples (2 bytes per sample)
+            noise_pcm = bytearray(last_len * 2)
+            plc_payload = audioop.lin2ulaw(bytes(noise_pcm), 2)
+
+        plc_packet = RtpPacket(
+            payload_type=payload_type,
+            sequence=self.next_sequence,
+            timestamp=next_ts,
+            ssrc=next_ssrc,
+            payload=plc_payload[:last_len]
+        )
+
         self.next_sequence = (self.next_sequence + 1) % 65536
-        return RtpPacket(payload=b'\x00' * AUDIO_FRAME_SIZE) # Return silence
+        # We don't set last_good_packet to the PLC packet
+        return plc_packet
+
+    def _log_stats(self):
+        """
+        Log jitter buffer statistics periodically.
+        """
+        current_time = time.time()
+        if current_time - self.last_log_time > self.log_interval:
+            with self.lock:
+                logging.info(f"JitterBuffer Stats: Received={self.packets_received}, Lost={self.packets_lost}, Late={self.packets_late}, Buffer Size={self.buffer.qsize()}")
+                self.last_log_time = current_time
 
     def clear(self):
         """
-        Clear all packets from buffer.
+        Clear all packets from the buffer and reset stats.
         """
         with self.lock:
-            self.buffer.clear()
-            self.last_sequence = None
+            while not self.buffer.empty():
+                try:
+                    self.buffer.get_nowait()
+                except queue.Empty:
+                    break
             self.next_sequence = None
+            self.last_good_packet = None
+            self.packets_received = 0
+            self.packets_lost = 0
+            self.packets_late = 0
 
 class RtpSession:
     """
     Manages RTP session for a single call.
     """
-    def __init__(self, local_ip, local_port, remote_ip, remote_port, payload_type=0, ssrc=0):
+    def __init__(self, local_ip, local_port, remote_ip, remote_port, payload_type=0):
         self.local_ip = local_ip
         self.local_port = local_port
         self.remote_ip = remote_ip
         self.remote_port = remote_port
         self.payload_type = payload_type
-        self.ssrc = ssrc
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind((local_ip, local_port))
-        self.seq = 0
-        self.timestamp = 0
-        self.jitter_buffer = JitterBuffer()
+        self.sock.settimeout(0.5)
+        self.seq = random.randint(0, 65535)
+        self.timestamp = random.randint(0, 2**32 - 1)
+        self.ssrc = random.randint(1, 2**32 - 1)
+
+        # VAD initialization
+        self.vad_enabled = True # Set to False to disable VAD
+        if self.vad_enabled:
+            self.vad = EnergyVAD(sample_rate=8000, frame_length=20, frame_shift=20) # Assuming 8000 Hz and 20ms frames
+        else:
+            self.vad = None
+        self.last_vad_state = False # To track changes in VAD state
+
+        self.running = False
+        self.recv_thread = None
+        self.send_lock = threading.Lock()
+        self.recv_lock = threading.Lock()
+        self.jitter_buffer = JitterBuffer(max_delay_ms=200, auto_adjust=True)
+
+        # AUTO packetization support for G.711 (8kHz, 8-bit per sample)
+        self.sample_rate = 8000
+        self.bytes_per_ms = self.sample_rate // 1000  # 8 bytes/ms for PCMU/PCMA
+        # Enable AUTO when AUDIO_FRAME_SIZE <= 0 or set to 'auto'
+        self.auto_packetization = False
+        try:
+            if isinstance(AUDIO_FRAME_SIZE, str) and AUDIO_FRAME_SIZE.strip().lower() == 'auto':
+                self.auto_packetization = True
+            elif isinstance(AUDIO_FRAME_SIZE, int) and AUDIO_FRAME_SIZE <= 0:
+                self.auto_packetization = True
+        except Exception:
+            self.auto_packetization = False
+        # Dynamic packetization parameters (in milliseconds)
+        self.packetization_ms = 20
+        self.min_packetization_ms = 20
+        self.max_packetization_ms = 40
+        # Outgoing buffer for encoded audio
+        self._tx_buffer = bytearray()
+        # Start receive loop immediately
+        self.start()
+
+    def start(self):
+        if self.running:
+            return
         self.running = True
-        self.receive_thread = threading.Thread(target=self._receive_loop)
-        self.receive_thread.daemon = True
-        self.receive_thread.start()
+        self.recv_thread = threading.Thread(target=self._receive_loop, name="rtp_rx")
+        self.recv_thread.daemon = True
+        self.recv_thread.start()
+
+        self.send_running = True
+        self.send_thread = threading.Thread(target=self._send_loop, name="rtp_tx")
+        self.send_thread.daemon = True
+        self.send_thread.start()
 
     def send_audio(self, audio_data):
         """
         Send audio data as RTP packets.
         """
-        frame_size = AUDIO_FRAME_SIZE
-        for i in range(0, len(audio_data), frame_size):
-            frame = audio_data[i:i+frame_size]
-            packet = RtpPacket(
-                payload_type=self.payload_type,
-                sequence=self.seq,
-                timestamp=self.timestamp,
-                ssrc=self.ssrc,
-                payload=frame
-            )
-            self.sock.sendto(packet.to_bytes(), (self.remote_ip, self.remote_port))
-            logging.info(f"Sent RTP packet seq={packet.sequence} size={len(packet.payload)} to {self.remote_ip}:{self.remote_port}")
-            self.seq = (self.seq + 1) % 65536
-            self.timestamp += AUDIO_FRAME_SIZE
+        self._tx_buffer.extend(audio_data)
+
+        if AUDIO_FRAME_SIZE == 'auto':
+            # Dynamic packetization
+            while len(self._tx_buffer) >= self.packetization_ms * self.bytes_per_ms:
+                frame_size = self.packetization_ms * self.bytes_per_ms
+                frame = bytes(self._tx_buffer[:frame_size])
+                del self._tx_buffer[:frame_size]
+                self.send_queue.put((frame, True))
+        else:
+            # Fixed-size packetization
+            frame_size = AUDIO_FRAME_SIZE
+            if not isinstance(frame_size, int) or frame_size <= 0:
+                frame_size = 160
+            while len(self._tx_buffer) >= frame_size:
+                frame = bytes(self._tx_buffer[:frame_size])
+                del self._tx_buffer[:frame_size]
+                self.send_queue.put((frame, False))
 
     def _receive_loop(self):
         """
@@ -169,9 +396,43 @@ class RtpSession:
             try:
                 data, addr = self.sock.recvfrom(4096)
                 packet = RtpPacket.from_bytes(data)
-                self.jitter_buffer.add_packet(packet)
-                logging.info(f"Received RTP packet seq={packet.sequence} size={len(packet.payload)} from {addr}")
+                if not packet.is_rtcp():
+                    if self.vad_enabled:
+                        audio_data = packet.payload
+                        audio_data_np = np.frombuffer(audio_data, dtype=np.int16)
+                        is_speech = bool(self.vad(audio_data_np)) # Use the callable EnergyVAD object
+                        if is_speech:
+                            self.jitter_buffer.add_packet(packet)
+                            self.last_vad_state = True
+                        elif self.last_vad_state:
+                            # If speech just ended, add a silence packet to mark the end of speech
+                            # This helps in preventing gaps in audio when speech resumes
+                            silence_packet = RtpPacket(payload=b'\x00' * len(audio_data), 
+                                                    sequence=packet.sequence, 
+                                                    timestamp=packet.timestamp if packet.timestamp is not None else 0, 
+                                                    payload_type=packet.payload_type)
+                            self.jitter_buffer.add_packet(silence_packet)
+                            self.last_vad_state = False
+                        # else: # No need for this else, as we discard non-speech if not transitioning
+                        # pass
+                    else:
+                        self.jitter_buffer.add_packet(packet)
+
+                logging.debug(f"Received RTP packet seq={packet.sequence} size={len(packet.payload)} from {addr}")
+            except socket.timeout:
+                # Normal idle timeout
+                continue
+            except OSError as e:
+                # Suppress expected errors during shutdown on Windows (WinError 10038)
+                if not self.running:
+                    break
+                if getattr(e, 'winerror', None) == 10038:
+                    logging.info("RTP socket closed, receive loop exiting")
+                    break
+                logging.error(f"RTP receive error: {e}")
             except Exception as e:
+                if not self.running:
+                    break
                 logging.error(f"RTP receive error: {e}")
 
     def get_audio(self, timeout=0.1):
@@ -188,4 +449,9 @@ class RtpSession:
         Stop RTP session.
         """
         self.running = False
-        self.sock.close()
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+        if self.recv_thread and self.recv_thread.is_alive():
+            self.recv_thread.join(timeout=1.0)

@@ -9,6 +9,7 @@ Classifier: Programming Language :: Python :: 3
 Classifier: License :: OSI Approved :: MIT License
 Classifier: Operating System :: OS Independent
 Requires-Dist: pyaudio
+Requires-Dist: ffmpeg-python
 Dynamic: author
 Dynamic: author-email
 Dynamic: classifier

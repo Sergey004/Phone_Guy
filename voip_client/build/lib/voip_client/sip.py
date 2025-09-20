@@ -26,10 +26,12 @@ class SipTransport:
         self.sock.settimeout(2.0)  # Increased timeout for better reliability
 
     def send(self, message, dest_address):
+        logging.debug(f"Sending SIP message to {dest_address}:\n{message}")
         self.sock.sendto(message.encode(), dest_address)
 
     def receive(self):
         data, addr = self.sock.recvfrom(4096)
+        logging.debug(f"Received SIP message from {addr}:\n{data.decode()}")
         return data.decode(), addr
 
     def close(self):
@@ -566,37 +568,37 @@ class SipClient:
             if key in self.owner.pending_responses:
                 del self.owner.pending_responses[key]
 
-def bye(self, call_id, sip_uri, from_tag, to_tag):
-    headers = {
-        "Via": f"SIP/2.0/UDP {self.local_ip}:{self.local_port};branch=z9hG4bK{self.cseq}",
-        "From": f"<sip:{self.username}@{self.server}>;tag={from_tag}",
-        "To": f"<{sip_uri}>;tag={to_tag}",
-        "Call-ID": call_id,
-        "CSeq": f"{self.cseq} BYE",
-        "Max-Forwards": "70",
-        "User-Agent": "Python VoIP Client",
-        "Content-Length": "0"
-    }
-    uri = sip_uri
-    key = (call_id, str(self.cseq), "BYE")
-    self.owner.pending_responses[key] = queue.Queue()
-    message = SipMessage(method="BYE", uri=uri, headers=headers)
-    self.transport.send(message.to_string(), (self.server, self.port))
-    self.cseq += 1
-    start_time = time.time()
-    timeout = 5
-    response = None
-    while time.time() - start_time < timeout and not response:
-        try:
-            response = self.owner.pending_responses[key].get(timeout=0.5)
-        except queue.Empty:
-            continue
-    if response:
-        logging.info(f"BYE response: {response.status_code} {response.reason}")
-    else:
-        logging.info("BYE timed out")
-    if key in self.owner.pending_responses:
-        del self.owner.pending_responses[key]
+    def bye(self, call_id, sip_uri, from_tag, to_tag):
+        headers = {
+            "Via": f"SIP/2.0/UDP {self.local_ip}:{self.local_port};branch=z9hG4bK{self.cseq}",
+            "From": f"<sip:{self.username}@{self.server}>;tag={from_tag}",
+            "To": f"<{sip_uri}>;tag={to_tag}",
+            "Call-ID": call_id,
+            "CSeq": f"{self.cseq} BYE",
+            "Max-Forwards": "70",
+            "User-Agent": "Python VoIP Client",
+            "Content-Length": "0"
+        }
+        uri = sip_uri
+        key = (call_id, str(self.cseq), "BYE")
+        self.owner.pending_responses[key] = queue.Queue()
+        message = SipMessage(method="BYE", uri=uri, headers=headers)
+        self.transport.send(message.to_string(), (self.server, self.port))
+        self.cseq += 1
+        start_time = time.time()
+        timeout = 5
+        response = None
+        while time.time() - start_time < timeout and not response:
+            try:
+                response = self.owner.pending_responses[key].get(timeout=0.5)
+            except queue.Empty:
+                continue
+        if response:
+            logging.info(f"BYE response: {response.status_code} {response.reason}")
+        else:
+            logging.info("BYE timed out")
+        if key in self.owner.pending_responses:
+            del self.owner.pending_responses[key]
 
     def send_response(self, status_code, reason, headers, dest_address, body=None):
         if body:
