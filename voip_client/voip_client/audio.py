@@ -47,6 +47,10 @@ class AudioProcessor:
         self.playback_buffer = bytearray()
         self.audio_thread = None
         self.running = False
+        # Event to request thread shutdown more reliably
+        self._stop_event = threading.Event()
+        # Expose stream so stop() can close it from another thread
+        self.stream = None
         self.pyaudio = pyaudio.PyAudio()
 
     def start(self):
@@ -54,6 +58,7 @@ class AudioProcessor:
         Start audio processing threads.
         """
         self.running = True
+        self._stop_event.clear()
         self.audio_thread = threading.Thread(target=self._process_audio)
         self.audio_thread.daemon = True
         self.audio_thread.start()
@@ -62,10 +67,41 @@ class AudioProcessor:
         """
         Stop audio processing.
         """
+        # Signal the thread to stop and wake any blocking get()
         self.running = False
+        self._stop_event.set()
+        try:
+            # Put sentinel to wake queue.get() if blocked
+            self.pcm_queue.put_nowait(None)
+        except Exception:
+            pass
+
+        if self.stream is not None:
+            try:
+                # Closing the stream from another thread will usually unblock
+                # a blocking write; catch and ignore errors that occur while
+                # the thread is winding down.
+                try:
+                    self.stream.stop_stream()
+                except Exception:
+                    pass
+                try:
+                    self.stream.close()
+                except Exception:
+                    pass
+            finally:
+                self.stream = None
+
         if self.audio_thread:
-            self.audio_thread.join()
-        self.pyaudio.terminate()
+            # Join with timeout to avoid indefinite blocking
+            self.audio_thread.join(timeout=1.0)
+            if self.audio_thread.is_alive():
+                logging.warning("AudioProcessor: audio thread did not stop within timeout")
+
+        try:
+            self.pyaudio.terminate()
+        except Exception:
+            pass
 
     def _process_audio(self):
         """
@@ -78,23 +114,35 @@ class AudioProcessor:
         else:
             # AUTO or invalid -> use 20 ms (320 samples) buffer for smooth playback
             frames_per_buffer = 320
-        stream = self.pyaudio.open(
+        # Create stream and expose it on the instance so `stop()` can close it
+        try:
+            self.stream = self.pyaudio.open(
             format=pyaudio.paInt16,
             channels=1,
             rate=self.sample_rate,
             input=False,
             output=True,
             frames_per_buffer=frames_per_buffer
-        )
-        stream.start_stream()
+            )
+        except Exception as e:
+            logging.error(f"Failed to open audio stream: {e}")
+            self.stream = None
+        else:
+            try:
+                self.stream.start_stream()
+            except Exception:
+                pass
         try:
             bytes_per_sample = 2
             target_bytes = frames_per_buffer * bytes_per_sample
-            while self.running:
+            while self.running and not self._stop_event.is_set():
                 try:
                     # Get next decoded PCM frame (may be smaller than the playback buffer)
                     # This queue stores decoded PCM frames (16-bit little-endian)
                     pcm_to_play = self.pcm_queue.get(timeout=0.1)
+                    # Wake sentinel to exit
+                    if pcm_to_play is None:
+                        break
                     if not isinstance(pcm_to_play, (bytes, bytearray)):
                         logging.warning("AudioProcessor: invalid pcm frame type, skipping")
                         continue
@@ -105,7 +153,8 @@ class AudioProcessor:
                     while len(self.playback_buffer) >= target_bytes:
                         chunk = bytes(self.playback_buffer[:target_bytes])
                         try:
-                            stream.write(chunk)
+                            if self.stream is not None:
+                                self.stream.write(chunk)
                         except Exception as e:
                             logging.error(f"Audio stream write error: {e}")
                             # On error, drop this chunk and continue
@@ -119,7 +168,8 @@ class AudioProcessor:
                         if pad_len > 0:
                             self.playback_buffer.extend(b"\x00" * pad_len)
                         try:
-                            stream.write(bytes(self.playback_buffer[:target_bytes]))
+                            if self.stream is not None:
+                                self.stream.write(bytes(self.playback_buffer[:target_bytes]))
                         except Exception as e:
                             logging.error(f"Audio stream write error on pad: {e}")
                         del self.playback_buffer[:target_bytes]
@@ -131,8 +181,16 @@ class AudioProcessor:
                     time.sleep(0.01)
         finally:
             try:
-                stream.stop_stream()
-                stream.close()
+                if self.stream is not None:
+                    try:
+                        self.stream.stop_stream()
+                    except Exception:
+                        pass
+                    try:
+                        self.stream.close()
+                    except Exception:
+                        pass
+                    self.stream = None
             except Exception:
                 pass
 

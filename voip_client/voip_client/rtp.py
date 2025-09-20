@@ -37,6 +37,34 @@ class RTPPacketManager:
                 packet = packet + (b"\x00" * (length - len(packet)))
         return packet
 
+    def available(self) -> int:
+        """Return number of bytes available to read from current buffer position."""
+        with self.bufferLock:
+            cur = self.buffer.tell()
+            # Seek to end to find total length
+            self.buffer.seek(0, io.SEEK_END)
+            end = self.buffer.tell()
+            self.buffer.seek(cur)
+            return max(0, end - cur)
+
+    def write_seq(self, data: bytes) -> None:
+        """Append data to the end of the internal buffer (sequential write)."""
+        self.bufferLock.acquire()
+        try:
+            # Preserve current read position so readers still see unread data
+            cur_pos = self.buffer.tell()
+            # Move to end and write
+            self.buffer.seek(0, io.SEEK_END)
+            self.buffer.write(data)
+            # Restore the read pointer to where it was before the append
+            try:
+                self.buffer.seek(cur_pos, io.SEEK_SET)
+            except Exception:
+                # If seeking back fails for any reason, leave pointer at end
+                pass
+        finally:
+            self.bufferLock.release()
+
     def rebuild(self, reset: bool, offset: int = 0, data: bytes = b"") -> None:
         self.rebuilding = True
         if reset:
@@ -301,12 +329,15 @@ class JitterBuffer:
             logging.error(f"Error decoding G.711 payload to PCM: {e}")
             pcm = b"\x00" * 320
 
-        # Timestamp offset used as the write offset in manager
+        # Use sequential append to manager to keep a continuous PCM stream
         try:
-            offset = int(packet.timestamp) if packet.timestamp is not None else 0
-        except Exception:
-            offset = 0
-        manager.write(offset, pcm)
+            manager.write_seq(pcm)
+            try:
+                logging.debug(f"Wrote {len(pcm)} bytes PCM to manager; manager_available={manager.available()}")
+            except Exception:
+                pass
+        except Exception as e:
+            logging.error(f"Error writing PCM to manager: {e}")
 
     def get_next_packet(self, timeout=0.05):
         """
@@ -481,6 +512,13 @@ class RtpSession:
         self.max_packetization_ms = 40
         # Outgoing buffer for encoded audio
         self._tx_buffer = bytearray()
+        # PCM streaming manager and prefill thread
+        self._pcm_manager = RTPPacketManager()
+        self._fill_thread = None
+        self._fill_running = False
+        # Telemetry
+        self.underrun_count = 0
+        self.last_manager_qsize = 0
         # Start receive loop immediately
         self.start()
 
@@ -491,6 +529,13 @@ class RtpSession:
         self.recv_thread = threading.Thread(target=self._receive_loop, name="rtp_rx")
         self.recv_thread.daemon = True
         self.recv_thread.start()
+
+        # Start prefill thread to decode jitter buffer into pcm manager
+        if not self._fill_running:
+            self._fill_running = True
+            self._fill_thread = threading.Thread(target=self._fill_manager_loop, name="rtp_prefill")
+            self._fill_thread.daemon = True
+            self._fill_thread.start()
 
         self.send_running = True
         self.send_thread = threading.Thread(target=self._send_loop, name="rtp_tx")  
@@ -556,36 +601,114 @@ class RtpSession:
         """
         Get next decoded audio frame from jitter buffer.
         """
-        # On first call, create a byte-oriented manager to aggregate decoded PCM
-        if not hasattr(self, '_pcm_manager'):
-            self._pcm_manager = RTPPacketManager()
-
-        # Try to collect a packet from jitter buffer and write decoded PCM into manager
-        packet = self.jitter_buffer.get_next_packet(timeout=timeout)
-        if packet:
-            # Decode and write into manager
+        # Ensure we have a pcm_chunk_size consistent with AudioProcessor
+        if not hasattr(self, 'pcm_chunk_size'):
             try:
-                # Assume PCMU for now (payload type 0)
-                self.jitter_buffer.write_to_manager(packet, self._pcm_manager, codec='pcmu')
-            except Exception as e:
-                logging.error(f"Error writing packet to pcm manager: {e}")
+                if isinstance(AUDIO_FRAME_SIZE, int) and AUDIO_FRAME_SIZE > 0:
+                    frames_per_buffer = max(160, 2 * AUDIO_FRAME_SIZE)
+                else:
+                    frames_per_buffer = 320
+            except Exception:
+                frames_per_buffer = 320
+            self.pcm_chunk_size = frames_per_buffer * 2
 
-        # Read fixed-size PCM chunk (320 bytes by default) and return it
+        # Wait up to timeout for enough bytes to be available in manager
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                avail = self._pcm_manager.available()
+            except Exception:
+                avail = 0
+            if avail >= self.pcm_chunk_size:
+                break
+            # If fill thread stopped, break early to avoid waiting forever
+            if not self._fill_running:
+                break
+            time.sleep(0.005)
+
         try:
-            pcm = self._pcm_manager.read(320)
+            # If not enough data was available, read() will pad with silence
+            pcm = self._pcm_manager.read(self.pcm_chunk_size)
+            # If we read mostly zeros, count as underrun (heuristic)
+            if pcm.count(b"\x00") >= int(len(pcm) * 0.9):
+                self.underrun_count += 1
             return pcm
         except Exception as e:
             logging.error(f"Error reading PCM from manager: {e}")
-            return b"\x00" * 320
+            self.underrun_count += 1
+            return b"\x00" * getattr(self, 'pcm_chunk_size', 320)
+
+    def _fill_manager_loop(self):
+        """Background thread that consumes jitter buffer, decodes packets and writes PCM into pcm manager."""
+        logging.info("RTP prefill thread started")
+        last_log = time.time()
+        while self.running and self._fill_running:
+            try:
+                packet = self.jitter_buffer.get_next_packet(timeout=0.02)
+                if packet:
+                    try:
+                        self.jitter_buffer.write_to_manager(packet, self._pcm_manager, codec='pcmu')
+                    except Exception as e:
+                        logging.error(f"Error prefill decode/write: {e}")
+                else:
+                    # No packet available; small sleep
+                    time.sleep(0.001)
+
+                # Periodic telemetry
+                if time.time() - last_log > 5:
+                    try:
+                        avail = self._pcm_manager.available()
+                    except Exception:
+                        avail = 0
+                    logging.info(f"PCM manager available bytes={avail}, underruns={self.underrun_count}")
+                    last_log = time.time()
+            except Exception as e:
+                logging.error(f"_fill_manager_loop error: {e}")
+                time.sleep(0.01)
+        logging.info("RTP prefill thread exiting")
 
     def stop(self):
         """
         Stop RTP session.
         """
+        # Signal threads to stop
         self.running = False
+        # Stop prefill thread first
+        try:
+            self._fill_running = False
+            if self._fill_thread and self._fill_thread.is_alive():
+                self._fill_thread.join(timeout=1.0)
+                if self._fill_thread.is_alive():
+                    logging.warning("RtpSession: prefill thread did not stop within timeout")
+        except Exception:
+            pass
+
+        # Stop send thread by sending sentinel to queue
+        try:
+            if self.send_queue is not None:
+                try:
+                    self.send_queue.put_nowait(None)
+                except Exception:
+                    pass
+            self.send_running = False
+            if hasattr(self, 'send_thread') and self.send_thread and self.send_thread.is_alive():
+                self.send_thread.join(timeout=1.0)
+                if self.send_thread.is_alive():
+                    logging.warning("RtpSession: send thread did not stop within timeout")
+        except Exception:
+            pass
+
+        # Close socket to unblock recv
         try:
             self.sock.close()
         except Exception:
             pass
-        if self.recv_thread and self.recv_thread.is_alive():
-            self.recv_thread.join(timeout=1.0)
+
+        # Join recv thread
+        try:
+            if self.recv_thread and self.recv_thread.is_alive():
+                self.recv_thread.join(timeout=1.0)
+                if self.recv_thread.is_alive():
+                    logging.warning("RtpSession: recv thread did not stop within timeout")
+        except Exception:
+            pass

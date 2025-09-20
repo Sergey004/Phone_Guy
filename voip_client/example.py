@@ -9,7 +9,7 @@ import tempfile
 import ffmpeg
 
 from voip_client.config import CODEC_PCMU, AUDIO_FRAME_SIZE
-from voip_client.voip import CallState, VoIPClient
+from voip_client import CallState, VoIPClient
 
 logging.basicConfig(
     level=logging.DEBUG,
