@@ -14,6 +14,7 @@ import audioop
 import io
 
 
+from .jitter_analyzer import JitterAnalyzer
 from .config import DEFAULT_RTP_PORT_RANGE, AUDIO_FRAME_SIZE
 from .enhanced_rtp import EnhancedRTPPacketManager
 
@@ -29,11 +30,13 @@ class RTPPacketManager:
         self.rebuilding = False
         self.last_rebuild = 0  # Время последней перестройки буфера
         self.max_packet_age = 5.0  # Максимальный возраст пакетов в секундах
+        self.jitter_analyzer = JitterAnalyzer()
+        self._min_prefill = 320  # Минимальный размер предварительной буферизации
 
     def read(self, length: int = 320) -> bytes:
         # If a rebuild is in progress, wait briefly
         while self.rebuilding:
-            time.sleep(0.01)
+            time.sleep(0.001)  # Уменьшаем задержку ожидания
         with self.bufferLock:
             packet = self.buffer.read(length)
             if len(packet) < length:
@@ -50,8 +53,17 @@ class RTPPacketManager:
             self.buffer.seek(cur)
             return max(0, end - cur)
 
-    def write_seq(self, data: bytes) -> None:
-        """Append data to the end of the internal buffer (sequential write)."""
+    def get_prefill_target(self) -> int:
+        """
+        Получает целевой размер предварительной буферизации на основе анализа джиттера
+        """
+        recommended = self.jitter_analyzer.get_recommended_buffer()
+        return max(self._min_prefill, recommended)
+
+    def write_seq(self, data: bytes, timestamp: float = None) -> None:
+        if timestamp is None:
+            timestamp = time.time()
+        
         self.bufferLock.acquire()
         try:
             # Preserve current read position so readers still see unread data
@@ -498,6 +510,7 @@ class RtpSession:
         self.vad = None
         self.last_vad_state = False
 
+        self.jitter_analyzer = JitterAnalyzer()
         self.running = False
         self.recv_thread = None
         self.send_lock = threading.Lock()
@@ -657,19 +670,28 @@ class RtpSession:
                 data, addr = self.sock.recvfrom(4096)
                 packet = RtpPacket.from_bytes(data)
                 if not packet.is_rtcp():
+                    # Анализируем джиттер для каждого пакета
+                    self.jitter_analyzer.analyze_packet(packet.sequence, time.time())
+                    
                     # Каждые 5 секунд выводим статистику
                     now = time.time()
                     if now - self._last_stats_time > 5:
-                        stats = self._pcm_manager.get_stats()
+                        rtp_stats = self._pcm_manager.get_stats()
+                        jitter_stats = self.jitter_analyzer.get_stats()
                         logging.info(f"RTP Statistics:\n"
-                                   f"Total packets: {stats['total_packets']}\n"
-                                   f"Buffer size: {stats['buffer_size']} bytes\n"
-                                   f"Packet count: {stats['packet_count']}\n"
-                                   f"Jitter: {stats['jitter_ms']:.1f} ms\n"
-                                   f"Avg interval: {stats['average_interval']*1000:.1f} ms")
+                                   f"Total packets: {rtp_stats['total_packets']}\n"
+                                   f"Buffer size: {rtp_stats['buffer_size']} bytes\n"
+                                   f"Packet count: {rtp_stats['packet_count']}\n"
+                                   f"Current jitter: {jitter_stats['current_jitter_ms']:.1f} ms\n"
+                                   f"Min/Max jitter: {jitter_stats['min_jitter_ms']:.1f}/{jitter_stats['max_jitter_ms']:.1f} ms\n"
+                                   f"Loss rate: {jitter_stats['loss_rate']:.2f}%\n"
+                                   f"Buffer size: {jitter_stats['buffer_size_ms']:.1f} ms")
                         self._last_stats_time = now
                     
-                    # Simplified: accept any non-empty payload and add to jitter buffer
+                    # Используем размер буфера из анализатора джиттера
+                    self.jitter_buffer.set_delay(int(self.jitter_analyzer.get_required_buffer_size()))
+                    
+                    # Добавляем пакет в буфер если он не пустой
                     if packet.payload and len(packet.payload) > 0:
                         self.jitter_buffer.add_packet(packet)
                     else:
