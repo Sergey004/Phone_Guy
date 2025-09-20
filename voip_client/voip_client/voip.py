@@ -72,12 +72,23 @@ a=rtpmap:0 PCMU/8000
             logging.info("RTP playback thread started")
             while self._rtp_playback_running and self.state == CallState.ANSWERED:
                 try:
-                    frame = self.rtp_session.get_audio(timeout=0.1)
-                    if frame is not None:
-                        # frame is encoded payload (e.g., PCMU). Decode+play.
-                        self.audio_processor.add_audio_frame(frame)
-                    else:
-                        logging.debug("No audio frame received from RTP session")
+                    pcm = self.rtp_session.get_audio(timeout=0.1)
+                    if pcm is None:
+                        logging.debug("No audio PCM received from RTP session")
+                        continue
+                    # Expect PCM bytes (16-bit little-endian). Push directly to playback queue.
+                    if not isinstance(pcm, (bytes, bytearray)):
+                        logging.error(f"RTP playback: received invalid pcm type: {type(pcm)}")
+                        continue
+                    if len(pcm) == 0:
+                        logging.warning("RTP playback: received empty pcm, skipping")
+                        continue
+                    try:
+                        # Push decoded PCM directly (bypass add_audio_frame which decodes encoded payload)
+                        self.audio_processor.pcm_queue.put(pcm)
+                    except Exception as put_exc:
+                        logging.error(f"RTP playback: failed to queue pcm: {put_exc}")
+                        continue
                 except Exception as e:
                     logging.error(f"RTP playback loop error: {e}")
             logging.info("RTP playback thread exiting")

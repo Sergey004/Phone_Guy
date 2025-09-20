@@ -11,10 +11,61 @@ import time
 import logging
 import random
 import audioop
-import numpy as np
-from vad import EnergyVAD
+import io
+
 
 from .config import DEFAULT_RTP_PORT_RANGE, AUDIO_FRAME_SIZE
+
+
+# A small byte-oriented packet manager (inspired by pyVoIP.RTPPacketManager)
+class RTPPacketManager:
+    def __init__(self):
+        # Offset chosen as in pyVoIP to keep monotonic timestamp space
+        self.offset = 4294967296
+        self.buffer = io.BytesIO()
+        self.bufferLock = threading.Lock()
+        self.log = {}
+        self.rebuilding = False
+
+    def read(self, length: int = 320) -> bytes:
+        # If a rebuild is in progress, wait briefly
+        while self.rebuilding:
+            time.sleep(0.01)
+        with self.bufferLock:
+            packet = self.buffer.read(length)
+            if len(packet) < length:
+                packet = packet + (b"\x00" * (length - len(packet)))
+        return packet
+
+    def rebuild(self, reset: bool, offset: int = 0, data: bytes = b"") -> None:
+        self.rebuilding = True
+        if reset:
+            self.log = {}
+            self.log[offset] = data
+            self.buffer = io.BytesIO(data)
+        else:
+            bufferloc = self.buffer.tell()
+            self.buffer = io.BytesIO()
+            for pkt in self.log:
+                self.write(pkt, self.log[pkt])
+            self.buffer.seek(bufferloc, 0)
+        self.rebuilding = False
+
+    def write(self, offset: int, data: bytes) -> None:
+        self.bufferLock.acquire()
+        self.log[offset] = data
+        bufferloc = self.buffer.tell()
+        if offset < self.offset:
+            reset = abs(offset - self.offset) >= 100000
+            self.offset = offset
+            self.bufferLock.release()
+            self.rebuild(reset, offset, data)
+            return
+        offset = offset - self.offset
+        self.buffer.seek(offset, 0)
+        self.buffer.write(data)
+        self.buffer.seek(bufferloc, 0)
+        self.bufferLock.release()
 
 class RtpPacket:
     """
@@ -86,7 +137,7 @@ class JitterBuffer:
         self.auto_adjust = auto_adjust
         self.buffer = queue.PriorityQueue()
         self.lock = threading.Lock()
-        self.next_sequence = None
+        self.next_sequence = 0
         # Capacity based on time window, assuming minimum 10 ms packetization
         self.max_buffer_size = max(10, int(self.max_delay_ms / 10) + 5)
         self.last_good_packet = None
@@ -129,8 +180,16 @@ class JitterBuffer:
                     )
                     self.sock.sendto(packet.to_bytes(), (self.remote_ip, self.remote_port))
                     logging.debug(f"Sent RTP packet seq={packet.sequence} size={len(packet.payload)} to {self.remote_ip}:{self.remote_port}")
-                    self.seq = (self.seq + 1) % 65536
-                    self.timestamp = (self.timestamp + len(frame)) % (2**32)
+                    try:
+                        seq_val = int(self.seq) if self.seq is not None else 0
+                    except Exception:
+                        seq_val = 0
+                    self.seq = (seq_val + 1) % 65536
+                    try:
+                        ts_val = int(self.timestamp) if self.timestamp is not None else 0
+                    except Exception:
+                        ts_val = 0
+                    self.timestamp = (ts_val + len(frame)) % (2**32)
                     logging.debug(f"Before timestamp update: self.timestamp type={type(self.timestamp)}, value={self.timestamp}; len(frame) value={len(frame)}")
 
                     # Simple backlog-based adaptation
@@ -155,8 +214,16 @@ class JitterBuffer:
                     )
                     self.sock.sendto(packet.to_bytes(), (self.remote_ip, self.remote_port))
                     logging.debug(f"Sent RTP packet seq={packet.sequence} size={len(packet.payload)} to {self.remote_ip}:{self.remote_port}")
-                    self.seq = (self.seq + 1) % 65536
-                    self.timestamp = (self.timestamp + len(frame)) % (2**32)
+                    try:
+                        seq_val = int(self.seq) if self.seq is not None else 0
+                    except Exception:
+                        seq_val = 0
+                    self.seq = (seq_val + 1) % 65536
+                    try:
+                        ts_val = int(self.timestamp) if self.timestamp is not None else 0
+                    except Exception:
+                        ts_val = 0
+                    self.timestamp = (ts_val + len(frame)) % (2**32)
                     logging.debug(f"Before timestamp update: self.timestamp type={type(self.timestamp)}, value={self.timestamp}; len(frame) value={len(frame)}")
 
             except queue.Empty:
@@ -196,8 +263,11 @@ class JitterBuffer:
         """
         with self.lock:
             self.packets_received += 1
-            if self.next_sequence is None:
-                self.next_sequence = packet.sequence
+            if self.next_sequence is None or not isinstance(self.next_sequence, int):
+                try:
+                    self.next_sequence = int(packet.sequence)
+                except Exception:
+                    self.next_sequence = 0
 
             # Check for late packets
             if packet.sequence < self.next_sequence:
@@ -216,10 +286,32 @@ class JitterBuffer:
         self._log_stats()
         self._adjust_buffer_delay()
 
+    def write_to_manager(self, packet, manager, codec='pcmu'):
+        """
+        Convert RTP packet payload (G.711) to 16-bit PCM and write into
+        the provided byte-oriented manager at timestamp offset.
+        """
+        try:
+            if codec == 'pcmu':
+                # ulaw -> 16-bit PCM (width=2)
+                pcm = audioop.ulaw2lin(packet.payload, 2)
+            else:
+                pcm = audioop.alaw2lin(packet.payload, 2)
+        except Exception as e:
+            logging.error(f"Error decoding G.711 payload to PCM: {e}")
+            pcm = b"\x00" * 320
+
+        # Timestamp offset used as the write offset in manager
+        try:
+            offset = int(packet.timestamp) if packet.timestamp is not None else 0
+        except Exception:
+            offset = 0
+        manager.write(offset, pcm)
+
     def get_next_packet(self, timeout=0.05):
         """
         Get the next packet in sequence order.
-        If a packet is missing, generate comfort noise (PLC).
+        Если нет пакета — всегда возвращать тишину (0x80), как pyVoIP.
         """
         start_time = time.time()
         while time.time() - start_time < timeout:
@@ -228,7 +320,11 @@ class JitterBuffer:
                     seq, packet = self.buffer.queue[0]
                     if seq == self.next_sequence:
                         _, packet = self.buffer.get()
-                        self.next_sequence = (self.next_sequence + 1) % 65536
+                        try:
+                            seq_val = int(self.next_sequence) if self.next_sequence is not None else 0
+                        except Exception:
+                            seq_val = 0
+                        self.next_sequence = (seq_val + 1) % 65536
                         self.last_good_packet = packet
                         return packet
                     elif seq < self.next_sequence:
@@ -239,39 +335,27 @@ class JitterBuffer:
                     # Packet is in the future, wait
             time.sleep(0.001)
 
-        # Packet not found, generate comfort noise
-        self.packets_lost += 1
-        logging.warning(f"Packet {self.next_sequence} not received, generating comfort noise (PLC).")
-        self._log_stats()
-        self._adjust_buffer_delay()
-
-        # Generate PLC payload length based on last good packet or default to 20 ms (160 samples encoded)
-        if self.last_good_packet:
-            last_len = len(self.last_good_packet.payload)
-            payload_type = self.last_good_packet.payload_type
-            next_ts = (self.last_good_packet.timestamp + last_len) % (2**32) if self.last_good_packet.timestamp is not None else 0
-            next_ssrc = self.last_good_packet.ssrc
-            # Simple PLC: repeat last payload
-            plc_payload = self.last_good_packet.payload
-        else:
-            last_len = 160
-            payload_type = 0
+        # Нет пакета — возвращаем тишину (0x80) длиной 160 байт
+        last_len = 160
+        payload_type = 0
+        if not isinstance(self.next_sequence, int):
             next_ts = 0
-            next_ssrc = 0
-            # Silence -> encode zero PCM of size last_len samples (2 bytes per sample)
-            noise_pcm = bytearray(last_len * 2)
-            plc_payload = audioop.lin2ulaw(bytes(noise_pcm), 2)
-
+        else:
+            next_ts = self.next_sequence
+        next_ssrc = 0
+        plc_payload = b"\x80" * last_len
+        if not isinstance(self.next_sequence, int):
+            seq_val = 0
+        else:
+            seq_val = self.next_sequence
         plc_packet = RtpPacket(
             payload_type=payload_type,
-            sequence=self.next_sequence,
+            sequence=seq_val,
             timestamp=next_ts,
             ssrc=next_ssrc,
-            payload=plc_payload[:last_len]
+            payload=plc_payload
         )
-
-        self.next_sequence = (self.next_sequence + 1) % 65536
-        # We don't set last_good_packet to the PLC packet
+        self.next_sequence = (seq_val + 1) % 65536
         return plc_packet
 
     def _log_stats(self):
@@ -294,7 +378,7 @@ class JitterBuffer:
                     self.buffer.get_nowait()
                 except queue.Empty:
                     break
-            self.next_sequence = None
+            self.next_sequence = 0
             self.last_good_packet = None
             self.packets_received = 0
             self.packets_lost = 0
@@ -326,7 +410,8 @@ class RtpSession:
                     self.sock.sendto(packet.to_bytes(), (self.remote_ip, self.remote_port))
                     logging.debug(f"Sent RTP packet seq={packet.sequence} size={len(packet.payload)} to {self.remote_ip}:{self.remote_port}")
                     self.seq = (self.seq + 1) % 65536
-                    self.timestamp = (self.timestamp + len(frame)) % (2**32)
+                    ts_val = int(self.timestamp) if self.timestamp is not None else 0
+                    self.timestamp = (ts_val + len(frame)) % (2**32)
                 else:
                     frame_size = AUDIO_FRAME_SIZE
                     if not isinstance(frame_size, int) or frame_size <= 0:
@@ -341,7 +426,8 @@ class RtpSession:
                     self.sock.sendto(packet.to_bytes(), (self.remote_ip, self.remote_port))
                     logging.debug(f"Sent RTP packet seq={packet.sequence} size={len(packet.payload)} to {self.remote_ip}:{self.remote_port}")
                     self.seq = (self.seq + 1) % 65536
-                    self.timestamp = (self.timestamp + len(frame)) % (2**32)
+                    ts_val = int(self.timestamp) if self.timestamp is not None else 0
+                    self.timestamp = (ts_val + len(frame)) % (2**32)
             except queue.Empty:
                 continue
             except Exception as e:
@@ -363,13 +449,10 @@ class RtpSession:
         self.timestamp = random.randint(0, 2**32 - 1)
         self.ssrc = random.randint(1, 2**32 - 1)
 
-        # VAD initialization
-        self.vad_enabled = True # Set to False to disable VAD
-        if self.vad_enabled:
-            self.vad = EnergyVAD(sample_rate=8000, frame_length=20, frame_shift=20) # Assuming 8000 Hz and 20ms frames
-        else:
-            self.vad = None
-        self.last_vad_state = False # To track changes in VAD state
+        # No VAD: simplify receive path to avoid numpy/vad dependencies
+        self.vad_enabled = False
+        self.vad = None
+        self.last_vad_state = False
 
         self.running = False
         self.recv_thread = None
@@ -446,26 +529,11 @@ class RtpSession:
                 data, addr = self.sock.recvfrom(4096)
                 packet = RtpPacket.from_bytes(data)
                 if not packet.is_rtcp():
-                    if self.vad_enabled:
-                        audio_data = packet.payload
-                        audio_data_np = np.frombuffer(audio_data, dtype=np.int16)
-                        is_speech = bool(self.vad(audio_data_np)) # Use the callable EnergyVAD object
-                        if is_speech:
-                            self.jitter_buffer.add_packet(packet)
-                            self.last_vad_state = True
-                        elif self.last_vad_state:
-                            # If speech just ended, add a silence packet to mark the end of speech
-                            # This helps in preventing gaps in audio when speech resumes
-                            silence_packet = RtpPacket(payload=b'\x00' * len(audio_data), 
-                                                    sequence=packet.sequence, 
-                                                    timestamp=packet.timestamp if packet.timestamp is not None else 0, 
-                                                    payload_type=packet.payload_type)
-                            self.jitter_buffer.add_packet(silence_packet)
-                            self.last_vad_state = False
-                        # else: # No need for this else, as we discard non-speech if not transitioning
-                        # pass
-                    else:
+                    # Simplified: accept any non-empty payload and add to jitter buffer
+                    if packet.payload and len(packet.payload) > 0:
                         self.jitter_buffer.add_packet(packet)
+                    else:
+                        logging.debug("Received RTP packet with empty payload, skipping")
 
                 logging.debug(f"Received RTP packet seq={packet.sequence} size={len(packet.payload)} from {addr}")
             except socket.timeout:
@@ -488,10 +556,27 @@ class RtpSession:
         """
         Get next decoded audio frame from jitter buffer.
         """
+        # On first call, create a byte-oriented manager to aggregate decoded PCM
+        if not hasattr(self, '_pcm_manager'):
+            self._pcm_manager = RTPPacketManager()
+
+        # Try to collect a packet from jitter buffer and write decoded PCM into manager
         packet = self.jitter_buffer.get_next_packet(timeout=timeout)
         if packet:
-            return packet.payload
-        return None
+            # Decode and write into manager
+            try:
+                # Assume PCMU for now (payload type 0)
+                self.jitter_buffer.write_to_manager(packet, self._pcm_manager, codec='pcmu')
+            except Exception as e:
+                logging.error(f"Error writing packet to pcm manager: {e}")
+
+        # Read fixed-size PCM chunk (320 bytes by default) and return it
+        try:
+            pcm = self._pcm_manager.read(320)
+            return pcm
+        except Exception as e:
+            logging.error(f"Error reading PCM from manager: {e}")
+            return b"\x00" * 320
 
     def stop(self):
         """
