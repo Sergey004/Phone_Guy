@@ -15,6 +15,7 @@ import io
 
 
 from .config import DEFAULT_RTP_PORT_RANGE, AUDIO_FRAME_SIZE
+from .enhanced_rtp import EnhancedRTPPacketManager
 
 
 # A small byte-oriented packet manager (inspired by pyVoIP.RTPPacketManager)
@@ -24,8 +25,10 @@ class RTPPacketManager:
         self.offset = 4294967296
         self.buffer = io.BytesIO()
         self.bufferLock = threading.Lock()
-        self.log = {}
+        self.log = {}  # Хранит пакеты для возможного восстановления
         self.rebuilding = False
+        self.last_rebuild = 0  # Время последней перестройки буфера
+        self.max_packet_age = 5.0  # Максимальный возраст пакетов в секундах
 
     def read(self, length: int = 320) -> bytes:
         # If a rebuild is in progress, wait briefly
@@ -473,11 +476,21 @@ class RtpSession:
         self.remote_ip = remote_ip
         self.remote_port = remote_port
         self.payload_type = payload_type
+        
+        # Events для синхронизации буферизации
+        self._buffer_ready = threading.Event()
+        self._buffer_reset = threading.Event()
+        
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind((local_ip, local_port))
         self.sock.settimeout(0.5)
         self.seq = random.randint(0, 65535)
         self.timestamp = random.randint(0, 2**32 - 1)
+        
+        # Используем улучшенный менеджер пакетов
+        self._pcm_manager = EnhancedRTPPacketManager()
+        self._last_stats_time = time.time()
+        self._last_stats_time = time.time()
         self.ssrc = random.randint(1, 2**32 - 1)
 
         # No VAD: simplify receive path to avoid numpy/vad dependencies
@@ -544,26 +557,96 @@ class RtpSession:
 
     def send_audio(self, audio_data):
         """
-        Send audio data as RTP packets.
+        Асинхронно отправляет аудиоданные через внутреннюю очередь.
         """
-        self._tx_buffer.extend(audio_data)
+        if not hasattr(self, '_async_send_queue'):
+            self._async_send_queue = queue.Queue()
+            self._async_send_thread = threading.Thread(target=self._async_send_loop, daemon=True)
+            self._async_send_thread.start()
+        self._async_send_queue.put(audio_data)
 
-        if AUDIO_FRAME_SIZE == 'auto':
-            # Dynamic packetization
-            while len(self._tx_buffer) >= self.packetization_ms * self.bytes_per_ms:
-                frame_size = self.packetization_ms * self.bytes_per_ms
-                frame = bytes(self._tx_buffer[:frame_size])
-                del self._tx_buffer[:frame_size]
-                self.send_queue.put((frame, True))
-        else:
-            # Fixed-size packetization
-            frame_size = AUDIO_FRAME_SIZE
-            if not isinstance(frame_size, int) or frame_size <= 0:
-                frame_size = 160
-            while len(self._tx_buffer) >= frame_size:
-                frame = bytes(self._tx_buffer[:frame_size])
-                del self._tx_buffer[:frame_size]
-                self.send_queue.put((frame, False))
+    def _async_send_loop(self):
+        """
+        Фоновый поток для асинхронной отправки аудио через send_queue.
+        """
+        while self.running:
+            try:
+                audio_data = self._async_send_queue.get(timeout=0.1)
+                if audio_data is None:
+                    break
+                self._tx_buffer.extend(audio_data)
+                if AUDIO_FRAME_SIZE == 'auto':
+                    while len(self._tx_buffer) >= self.packetization_ms * self.bytes_per_ms:
+                        frame_size = self.packetization_ms * self.bytes_per_ms
+                        frame = bytes(self._tx_buffer[:frame_size])
+                        del self._tx_buffer[:frame_size]
+                        self.send_queue.put((frame, True))
+                else:
+                    frame_size = AUDIO_FRAME_SIZE
+                    if not isinstance(frame_size, int) or frame_size <= 0:
+                        frame_size = 160
+                    while len(self._tx_buffer) >= frame_size:
+                        frame = bytes(self._tx_buffer[:frame_size])
+                        del self._tx_buffer[:frame_size]
+                        self.send_queue.put((frame, False))
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logging.error(f"Async send loop error: {e}")
+
+    def stop(self):
+        """
+        Stop RTP session.
+        """
+        # Signal threads to stop
+        self.running = False
+        # Остановить асинхронный поток отправки
+        try:
+            if hasattr(self, '_async_send_queue'):
+                self._async_send_queue.put_nowait(None)
+            if hasattr(self, '_async_send_thread') and self._async_send_thread.is_alive():
+                self._async_send_thread.join(timeout=1.0)
+        except Exception:
+            pass
+        # Stop prefill thread first
+        try:
+            self._fill_running = False
+            if self._fill_thread and self._fill_thread.is_alive():
+                self._fill_thread.join(timeout=1.0)
+                if self._fill_thread.is_alive():
+                    logging.warning("RtpSession: prefill thread did not stop within timeout")
+        except Exception:
+            pass
+
+        # Stop send thread by sending sentinel to queue
+        try:
+            if self.send_queue is not None:
+                try:
+                    self.send_queue.put_nowait(None)
+                except Exception:
+                    pass
+            self.send_running = False
+            if hasattr(self, 'send_thread') and self.send_thread and self.send_thread.is_alive():
+                self.send_thread.join(timeout=1.0)
+                if self.send_thread.is_alive():
+                    logging.warning("RtpSession: send thread did not stop within timeout")
+        except Exception:
+            pass
+
+        # Close socket to unblock recv
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
+        # Join recv thread
+        try:
+            if self.recv_thread and self.recv_thread.is_alive():
+                self.recv_thread.join(timeout=1.0)
+                if self.recv_thread.is_alive():
+                    logging.warning("RtpSession: recv thread did not stop within timeout")
+        except Exception:
+            pass
 
     def _receive_loop(self):
         """
@@ -574,6 +657,18 @@ class RtpSession:
                 data, addr = self.sock.recvfrom(4096)
                 packet = RtpPacket.from_bytes(data)
                 if not packet.is_rtcp():
+                    # Каждые 5 секунд выводим статистику
+                    now = time.time()
+                    if now - self._last_stats_time > 5:
+                        stats = self._pcm_manager.get_stats()
+                        logging.info(f"RTP Statistics:\n"
+                                   f"Total packets: {stats['total_packets']}\n"
+                                   f"Buffer size: {stats['buffer_size']} bytes\n"
+                                   f"Packet count: {stats['packet_count']}\n"
+                                   f"Jitter: {stats['jitter_ms']:.1f} ms\n"
+                                   f"Avg interval: {stats['average_interval']*1000:.1f} ms")
+                        self._last_stats_time = now
+                    
                     # Simplified: accept any non-empty payload and add to jitter buffer
                     if packet.payload and len(packet.payload) > 0:
                         self.jitter_buffer.add_packet(packet)
@@ -600,6 +695,7 @@ class RtpSession:
     def get_audio(self, timeout=0.1):
         """
         Get next decoded audio frame from jitter buffer.
+        Prefill threshold: не отдавать PCM, пока не накопится минимум prefill_threshold байт (как pyVoIP).
         """
         # Ensure we have a pcm_chunk_size consistent with AudioProcessor
         if not hasattr(self, 'pcm_chunk_size'):
@@ -607,18 +703,40 @@ class RtpSession:
                 if isinstance(AUDIO_FRAME_SIZE, int) and AUDIO_FRAME_SIZE > 0:
                     frames_per_buffer = max(160, 2 * AUDIO_FRAME_SIZE)
                 else:
-                    frames_per_buffer = 320
+                    frames_per_buffer = 640
             except Exception:
                 frames_per_buffer = 320
             self.pcm_chunk_size = frames_per_buffer * 2
 
-        # Wait up to timeout for enough bytes to be available in manager
+        # Используем адаптивный размер буфера на основе статистики джиттера
+        prefill_threshold = self.jitter_analyzer.get_recommended_buffer()
         start = time.time()
+        prefilled = False
+        
+        # Сбрасываем счетчик underrun при старте новой буферизации
+        self.underrun_count = 0
+        
         while time.time() - start < timeout:
             try:
                 avail = self._pcm_manager.available()
+                if not hasattr(self, '_last_buffer_check'):
+                    self._last_buffer_check = time.time()
+                now = time.time()
+                interval = now - self._last_buffer_check
+                self._last_buffer_check = now
+                logging.debug(f"Buffer check interval: {interval*1000:.1f}ms, Available: {avail} bytes")
             except Exception:
                 avail = 0
+            if not prefilled:
+                if avail >= prefill_threshold:
+                    prefilled = True
+                    logging.info(f"Buffer prefilled with {avail} bytes")
+                    self._buffer_ready.set()
+                else:
+                    logging.debug(f"Waiting for prefill: {avail}/{prefill_threshold} bytes")
+                    self._buffer_ready.clear()
+                    time.sleep(0.005)
+                    continue
             if avail >= self.pcm_chunk_size:
                 break
             # If fill thread stopped, break early to avoid waiting forever
@@ -629,9 +747,24 @@ class RtpSession:
         try:
             # If not enough data was available, read() will pad with silence
             pcm = self._pcm_manager.read(self.pcm_chunk_size)
+            if not hasattr(self, '_last_read_time'):
+                self._last_read_time = time.time()
+            now = time.time()
+            interval = now - self._last_read_time
+            self._last_read_time = now
+            logging.debug(f"PCM read interval: {interval*1000:.1f}ms, Size: {len(pcm)} bytes")
+            
             # If we read mostly zeros, count as underrun (heuristic)
-            if pcm.count(b"\x00") >= int(len(pcm) * 0.9):
+            zeros = pcm.count(b"\x00")
+            if zeros >= int(len(pcm) * 0.9):
                 self.underrun_count += 1
+                logging.warning(f"Buffer underrun detected: {zeros}/{len(pcm)} zero bytes")
+                # При существенном подряд underrun сбрасываем буфер
+                if self.underrun_count > 5:
+                    self._buffer_reset.set()
+                    prefilled = False
+                    self._buffer_ready.clear()
+                    logging.warning("Multiple underruns detected, resetting buffer")
             return pcm
         except Exception as e:
             logging.error(f"Error reading PCM from manager: {e}")
@@ -643,6 +776,16 @@ class RtpSession:
         logging.info("RTP prefill thread started")
         last_log = time.time()
         while self.running and self._fill_running:
+            # Проверяем необходимость сброса буфера
+            if self._buffer_reset.is_set():
+                logging.info("Buffer reset requested, clearing PCM manager")
+                try:
+                    with self._pcm_manager.bufferLock:
+                        self._pcm_manager.buffer = io.BytesIO()
+                except Exception as e:
+                    logging.error(f"Error resetting buffer: {e}")
+                self._buffer_reset.clear()
+                self.underrun_count = 0
             try:
                 packet = self.jitter_buffer.get_next_packet(timeout=0.02)
                 if packet:

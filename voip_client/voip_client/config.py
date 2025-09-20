@@ -8,6 +8,6 @@ DEFAULT_RTP_PORT_RANGE = (10000, 20000)
 # AUDIO_FRAME_SIZE options:
 # - integer > 0: fixed bytes per RTP payload (e.g., 160 for 20ms G.711 at 8kHz)
 # - 0 or negative, or string 'auto': enable dynamic packetization (AUTO)
-AUDIO_FRAME_SIZE = 'auto'
+AUDIO_FRAME_SIZE = 160  # Фиксированный размер для стабильной передачи
 CODEC_PCMU = "PCMU"
 CODEC_PCMA = "PCMA"
