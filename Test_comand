@@ -1,0 +1,1 @@
+python example.py --server 192.168.1.176 --username 555533 --password Test1234 --callee sip:1001@192.168.1.176 --audio-file F:\Test_Phone\Test_audio.wav --local-ip 192.168.1.181

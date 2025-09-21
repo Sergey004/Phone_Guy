@@ -98,12 +98,12 @@ class JitterAnalyzer:
         Returns:
             float: Рекомендуемый размер буфера в миллисекундах
         """
-        if not self.jitter_buffer:
+        if not self.jitter_window:
             return self.target_jitter_ms
             
         try:
             # Используем 95-й перцентиль джиттера для определения размера буфера
-            jitter_values = sorted(self.jitter_buffer)
+            jitter_values = sorted(self.jitter_window)
             percentile_95 = jitter_values[int(len(jitter_values) * 0.95)]
             
             # Добавляем запас для компенсации
@@ -113,24 +113,9 @@ class JitterAnalyzer:
             min_buffer = 20  # Минимум 20 мс
             max_buffer = 200  # Максимум 200 мс
             return max(min_buffer, min(max_buffer, buffer_size))
-        except:
+        except Exception as e:
+            logging.error(f"Error calculating recommended buffer: {e}")
             return self.target_jitter_ms
-            self.jitter_buffer.append(jitter)
-            
-            # Обновляем статистику
-            self.min_jitter = min(self.min_jitter, jitter)
-            self.max_jitter = max(self.max_jitter, jitter)
-            
-            # Поддерживаем размер буфера
-            if len(self.jitter_buffer) > self.max_buffer_size:
-                self.jitter_buffer.popleft()
-                
-            # Обновляем текущий джиттер (средний по буферу)
-            self.current_jitter = statistics.mean(self.jitter_buffer)
-            
-        self.total_packets += 1
-        self.last_arrival_time = arrival_time
-        self.last_sequence = sequence_number
 
     def get_required_buffer_size(self):
         """
