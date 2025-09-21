@@ -297,6 +297,25 @@ a=rtpmap:0 PCMU/8000
         stream.close()
         p.terminate()
 
+    def accept_call(self):
+        """
+        Принять входящий звонок: отправить 200 OK, запустить RTP и аудио.
+        """
+        with self.lock:
+            if self.state != CallState.RINGING:
+                logging.warning("accept_call: call not in RINGING state")
+                return
+            # Отправляем 200 OK на INVITE
+            self.sip_client.accept(self.call_id, self.sip_uri, self.local_tag, self.remote_tag)
+            self.state = CallState.ANSWERED
+            # Запускаем RTP и аудиопоток
+            if self.rtp_session:
+                self.rtp_session.start()
+            self.audio_processor.start()
+            # Запускаем поток воспроизведения RTP
+            self._start_rtp_playback()
+            logging.info("Call accepted and audio started")
+
 class VoIPClient:
     """
     Main VoIP client with call management.

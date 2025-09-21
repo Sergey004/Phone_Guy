@@ -18,8 +18,13 @@ logging.basicConfig(
 
 def handle_incoming_call(call):
     logging.info(f"Incoming call from {getattr(call, 'remote_uri', 'unknown')}")
-    call.answer()
-    logging.info("Call answered")
+    # Используем новый метод приёма звонка
+    if hasattr(call, 'accept_call'):
+        call.accept_call()
+        logging.info("Call accepted (using accept_call)")
+    else:
+        call.answer()
+        logging.info("Call answered (legacy answer())")
     time.sleep(5)  # Keep the call open for 5 seconds
     call.hangup()
     logging.info("Call hung up")
@@ -89,6 +94,8 @@ def main():
         local_port=args.local_port,
         rtp_port_range=rtp_port_range,
     )
+    # Регистрируем обработчик входящего звонка
+    client.on_incoming_call = handle_incoming_call
     client.start()
 
     temp_converted = None
