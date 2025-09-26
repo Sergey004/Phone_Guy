@@ -269,13 +269,18 @@ a=rtpmap:0 PCMU/8000
         if self.rtp_session:
             self.rtp_session.send_audio(encoded)
 
-    def receive_audio(self):
+    def receive_audio(self, length=320, blocking=True):
         """
         Receive PCM audio frames.
+        Implements blocking/non-blocking modes similar to pyVoIP for better audio continuity.
         """
         if self.state != CallState.ANSWERED:
-            return
-        return self.audio_processor.get_audio_frame()
+            return b"\x00" * length
+        
+        if self.rtp_session:
+            return self.rtp_session.get_audio(timeout=0.1, blocking=blocking)
+        else:
+            return b"\x00" * length
 
     def _capture_microphone(self):
         p = pyaudio.PyAudio()

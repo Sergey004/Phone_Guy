@@ -117,6 +117,33 @@ class EnhancedRTPPacketManager:
         finally:
             self.rebuilding = False
             
+    def write_seq(self, data: bytes, timestamp: float = None) -> None:
+        """Записывает данные последовательно в буфер (для совместимости с RTPPacketManager)."""
+        if timestamp is None:
+            timestamp = time.time()
+        
+        with self.bufferLock:
+            # Сохраняем текущую позицию чтения
+            cur_pos = self.buffer.tell()
+            # Перемещаемся в конец и записываем данные
+            self.buffer.seek(0, io.SEEK_END)
+            self.buffer.write(data)
+            # Восстанавливаем позицию чтения
+            try:
+                self.buffer.seek(cur_pos, io.SEEK_SET)
+            except Exception:
+                # Если не удалось вернуться, оставляем указатель в конце
+                pass
+            
+    def available(self) -> int:
+        """Возвращает количество доступных байт для чтения."""
+        with self.bufferLock:
+            cur = self.buffer.tell()
+            self.buffer.seek(0, io.SEEK_END)
+            end = self.buffer.tell()
+            self.buffer.seek(cur)
+            return max(0, end - cur)
+
     def get_stats(self) -> dict:
         """Возвращает текущую статистику буфера."""
         stats = {

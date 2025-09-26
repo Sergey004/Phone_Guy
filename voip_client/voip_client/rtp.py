@@ -12,108 +12,123 @@ import logging
 import random
 import audioop
 import io
-
+from collections import deque
 
 from .jitter_analyzer import JitterAnalyzer
 from .config import DEFAULT_RTP_PORT_RANGE, AUDIO_FRAME_SIZE, RTP_PAYLOAD_TYPE_PCMU, RTP_PAYLOAD_TYPE_PCMA, RTP_SAMPLE_RATE, RTP_PACKETIZATION_INTERVAL, RTP_MAX_JITTER_BUFFER_MS, RTP_MIN_JITTER_BUFFER_MS
-from .enhanced_rtp import EnhancedRTPPacketManager
+from .rtp_diagnostics import RTPDiagnostics, AudioQualityMonitor
 
-
-# A small byte-oriented packet manager (inspired by pyVoIP.RTPPacketManager)
 class RTPPacketManager:
-    def __init__(self):
-        # Offset chosen as in pyVoIP to keep monotonic timestamp space
-        self.offset = 4294967296
+    def __init__(self, max_buffer_size=8192):
         self.buffer = io.BytesIO()
         self.bufferLock = threading.Lock()
-        self.log = {}  # Хранит пакеты для возможного восстановления
-        self.rebuilding = False
-        self.last_rebuild = 0  # Время последней перестройки буфера
-        self.max_packet_age = 5.0  # Максимальный возраст пакетов в секундах
-        self.jitter_analyzer = JitterAnalyzer()
-        self._min_prefill = 320  # Минимальный размер предварительной буферизации
-
-    def read(self, length: int = 320) -> bytes:
-        # If a rebuild is in progress, wait briefly
-        while self.rebuilding:
-            time.sleep(0.001)  # Уменьшаем задержку ожидания
-        with self.bufferLock:
-            packet = self.buffer.read(length)
-            if len(packet) < length:
-                packet = packet + (b"\x00" * (length - len(packet)))
-        return packet
-
-    def available(self) -> int:
-        """Return number of bytes available to read from current buffer position."""
-        with self.bufferLock:
-            cur = self.buffer.tell()
-            # Seek to end to find total length
-            self.buffer.seek(0, io.SEEK_END)
-            end = self.buffer.tell()
-            self.buffer.seek(cur)
-            return max(0, end - cur)
-
-    def get_prefill_target(self) -> int:
-        """
-        Получает целевой размер предварительной буферизации на основе анализа джиттера
-        """
-        recommended = self.jitter_analyzer.get_recommended_buffer()
-        return max(self._min_prefill, recommended)
-
-    def write_seq(self, data: bytes, timestamp: float = None) -> None:
-        if timestamp is None:
-            timestamp = time.time()
+        self.last_read_time = time.time()
+        self.max_buffer_size = max_buffer_size
+        self.total_written = 0
+        self.total_read = 0
+        self.underrun_count = 0
+        self.overrun_count = 0
         
-        self.bufferLock.acquire()
-        try:
-            # Preserve current read position so readers still see unread data
-            cur_pos = self.buffer.tell()
-            # Move to end and write
+    def read(self, length: int = 320) -> bytes:
+        with self.bufferLock:
+            current_pos = self.buffer.tell()
             self.buffer.seek(0, io.SEEK_END)
-            self.buffer.write(data)
-            # Restore the read pointer to where it was before the append
-            try:
-                self.buffer.seek(cur_pos, io.SEEK_SET)
-            except Exception:
-                # If seeking back fails for any reason, leave pointer at end
-                pass
-        finally:
-            self.bufferLock.release()
-
-    def rebuild(self, reset: bool, offset: int = 0, data: bytes = b"") -> None:
-        self.rebuilding = True
-        if reset:
-            self.log = {}
-            self.log[offset] = data
-            self.buffer = io.BytesIO(data)
-        else:
-            bufferloc = self.buffer.tell()
-            self.buffer = io.BytesIO()
-            for pkt in self.log:
-                self.write(pkt, self.log[pkt])
-            self.buffer.seek(bufferloc, 0)
-        self.rebuilding = False
-
-    def write(self, offset: int, data: bytes) -> None:
-        self.bufferLock.acquire()
-        self.log[offset] = data
-        bufferloc = self.buffer.tell()
-        if offset < self.offset:
-            reset = abs(offset - self.offset) >= 100000
-            self.offset = offset
-            self.bufferLock.release()
-            self.rebuild(reset, offset, data)
+            buffer_end = self.buffer.tell()
+            
+            # Проверяем, достаточно ли данных
+            available_data = max(0, buffer_end - current_pos)
+            
+            if available_data < length:
+                # Зафиксировать underrun
+                self.underrun_count += 1
+                if self.underrun_count % 100 == 1:  # Логируем каждые 100 underrun
+                    logging.warning(f"RTPPacketManager underrun: available={available_data}, requested={length}")
+                
+                # Читаем все доступные данные
+                self.buffer.seek(current_pos)
+                data = self.buffer.read(available_data)
+                
+                # Дополняем тишиной
+                data = data + (b"\x80" * (length - len(data)))
+                
+                # Перемещаем указатель в конец (очищаем буфер)
+                self.buffer.seek(0, io.SEEK_END)
+                self.buffer.truncate()
+                
+            else:
+                # Нормальное чтение
+                self.buffer.seek(current_pos)
+                data = self.buffer.read(length)
+                
+                # Удаляем прочитанные данные из буфера
+                remaining_data = self.buffer.read()
+                self.buffer.seek(0)
+                self.buffer.truncate()
+                self.buffer.write(remaining_data)
+                self.buffer.seek(0)
+            
+            self.last_read_time = time.time()
+            self.total_read += len(data)
+            return data
+            
+    def write_seq(self, data: bytes, timestamp: float = None) -> None:
+        if not data:
             return
-        offset = offset - self.offset
-        self.buffer.seek(offset, 0)
-        self.buffer.write(data)
-        self.buffer.seek(bufferloc, 0)
-        self.bufferLock.release()
+            
+        with self.bufferLock:
+            # Проверяем размер буфера перед записью
+            current_pos = self.buffer.tell()
+            self.buffer.seek(0, io.SEEK_END)
+            current_size = self.buffer.tell()
+            
+            # Если буфер слишком большой, удаляем старые данные
+            if current_size > self.max_buffer_size:
+                self.overrun_count += 1
+                if self.overrun_count % 100 == 1:  # Логируем каждые 100 overrun
+                    logging.warning(f"RTPPacketManager overrun: size={current_size}, max={self.max_buffer_size}")
+                
+                # Читаем все данные и удаляем половину
+                self.buffer.seek(0)
+                all_data = self.buffer.read()
+                half_point = len(all_data) // 2
+                self.buffer.seek(0)
+                self.buffer.truncate()
+                self.buffer.write(all_data[half_point:])
+                current_size = len(all_data) - half_point
+            
+            # Записываем новые данные в конец
+            self.buffer.write(data)
+            self.total_written += len(data)
+            
+            # Восстанавливаем позицию чтения (в начало, если мы читали)
+            if current_pos == 0:
+                self.buffer.seek(0)
+            else:
+                # Сохраняем относительную позицию
+                self.buffer.seek(min(current_pos, current_size))
+    
+    def available(self) -> int:
+        with self.bufferLock:
+            current_pos = self.buffer.tell()
+            self.buffer.seek(0, io.SEEK_END)
+            end_pos = self.buffer.tell()
+            self.buffer.seek(current_pos)
+            return max(0, end_pos - current_pos)
+    
+    def get_stats(self) -> dict:
+        """Возвращает статистику буфера."""
+        with self.bufferLock:
+            return {
+                'total_written': self.total_written,
+                'total_read': self.total_read,
+                'available': self.available(),
+                'underruns': self.underrun_count,
+                'overruns': self.overrun_count
+            }
 
 class RtpPacket:
-    """
-    Represents an RTP packet with header and payload.
-    """
+    """Represents an RTP packet with header and payload."""
+    
     def __init__(self, payload_type=0, sequence=0, timestamp=0, ssrc=0, payload=b''):
         self.version = 2
         self.padding = 0
@@ -128,11 +143,9 @@ class RtpPacket:
 
     @classmethod
     def from_bytes(cls, data):
-        """
-        Parse raw RTP packet bytes into RtpPacket object.
-        """
         if len(data) < 12:
             raise ValueError("RTP packet too short")
+        
         header = struct.unpack('!BBHII', data[:12])
         version = (header[0] >> 6) & 0x3
         padding = (header[0] >> 5) & 0x1
@@ -144,583 +157,531 @@ class RtpPacket:
         timestamp = header[3]
         ssrc = header[4]
         payload = data[12:]
-        return cls(
-            payload_type=payload_type,
-            sequence=sequence,
-            timestamp=timestamp,
-            ssrc=ssrc,
-            payload=payload
-        )
-
-    def is_rtcp(self):
-        """
-        Checks if the packet is an RTCP packet.
-        RTCP packet types are typically in the range 200-204.
-        """
-        return 200 <= self.payload_type <= 204
+        
+        return cls(payload_type, sequence, timestamp, ssrc, payload)
 
     def to_bytes(self):
-        """
-        Convert RtpPacket object to raw bytes.
-        """
         header = bytearray(12)
         header[0] = (self.version << 6) | (self.padding << 5) | (self.extension << 4) | self.csrc_count
         header[1] = (self.marker << 7) | self.payload_type
         struct.pack_into('!HII', header, 2, self.sequence, self.timestamp, self.ssrc)
         return bytes(header) + self.payload
 
+    def is_rtcp(self):
+        return 200 <= self.payload_type <= 204
+
 class JitterBuffer:
-    """
-    A more advanced jitter buffer for RTP packets.
-    It uses a priority queue to handle out-of-order packets and adapts to jitter.
-    """
-    def __init__(self, max_delay_ms=200, sample_rate=8000, auto_adjust=False):
+    """Адаптивный jitter buffer с динамической настройкой размера."""
+    
+    def __init__(self, max_delay_ms=100, sample_rate=8000, max_sequence_gap=5, initial_max_buffer_size=50, initial_min_buffer_size=10, target_jitter_ms=50, adaptation_factor=0.1, adaptation_interval_sec=5, get_next_packet_timeout=0.02):
         self.max_delay_ms = max_delay_ms
         self.sample_rate = sample_rate
-        self.auto_adjust = auto_adjust
-        self.buffer = queue.PriorityQueue()
+        self.packets = {}  # sequence -> packet
         self.lock = threading.Lock()
-        self.next_sequence = 0
-        # Capacity based on time window, assuming minimum 10 ms packetization
-        self.max_buffer_size = max(10, int(self.max_delay_ms / 10) + 5)
-        self.last_good_packet = None
-        # Statistics
-        self.packets_received = 0
-        self.packets_lost = 0
-        self.packets_late = 0
-        self.log_interval = 5  # Log stats every 5 seconds
-        self.last_log_time = time.time()
-        self.last_adjust_time = time.time()
-        self.comfort_noise_frame = b'\x00' * 160 # Default to 20ms of silence for G.711
-        self.adjust_interval = 1 # Adjust every 1 second
-
-    def _adjust_buffer_delay(self):
-        if not self.auto_adjust:
-            return
-
-        now = time.time()
-        if now - self.last_adjust_time < self.adjust_interval:
-            return
-
-        self.last_adjust_time = now
-
-        # Simple adjustment logic:
-        # If packet loss is high, increase delay to allow more time for packets to arrive.
-        # If buffer is consistently low, decrease delay to reduce latency.
-        # These are heuristic values and might need tuning.
-
-        if self.packets_lost > 0 and self.max_delay_ms < 500:
-            self.max_delay_ms = min(500, self.max_delay_ms + 20)  # Increase by 20ms, max 500ms
-            logging.info(f"JitterBuffer: Increasing max_delay_ms to {self.max_delay_ms} due to packet loss.")
-        elif self.buffer.qsize() < self.max_buffer_size / 2 and self.max_delay_ms > 60:
-            self.max_delay_ms = max(60, self.max_delay_ms - 10)  # Decrease by 10ms, min 60ms
-            logging.info(f"JitterBuffer: Decreasing max_delay_ms to {self.max_delay_ms} due to low buffer.")
-
-        # Reset packet loss counter after adjustment period
-        self.packets_lost = 0
-
-    def add_packet(self, packet):
-        """
-        Add RTP packet to the jitter buffer.
-        """
-        with self.lock:
-            self.packets_received += 1
-            if self.next_sequence is None or not isinstance(self.next_sequence, int):
-                try:
-                    self.next_sequence = int(packet.sequence)
-                except Exception:
-                    self.next_sequence = 0
-
-            # Check for late packets
-            if packet.sequence < self.next_sequence:
-                self.packets_late += 1
-                return  # Discard late packet
-
-            self.buffer.put((packet.sequence, packet))
-
-            # Basic overflow protection
-            if self.buffer.qsize() > self.max_buffer_size * 2:
-                try:
-                    self.buffer.get_nowait()
-                except queue.Empty:
-                    pass
+        self.next_sequence = None
+        self.max_buffer_size = initial_max_buffer_size
+        self.min_buffer_size = initial_min_buffer_size
+        self.stats = {
+            'received': 0,
+            'lost': 0,
+            'late': 0,
+            'out_of_order': 0
+        }
+        self.last_stats_time = time.time()
         
-        self._log_stats()
-        self._adjust_buffer_delay()
+        # Адаптивные параметры
+        self.packet_arrival_times = []  # Времена прибытия пакетов
+        self.max_arrival_history = 100
+        self.current_jitter_ms = 0
+        self.target_jitter_ms = target_jitter_ms
+        self.adaptation_factor = adaptation_factor
+        self.last_adaptation_time = time.time()
+        self.max_sequence_gap = max_sequence_gap
+        self.adaptation_interval_sec = adaptation_interval_sec
 
-    def write_to_manager(self, packet, manager, codec='pcmu'):
-        """
-        Convert RTP packet payload (G.711) to 16-bit PCM and write into
-        the provided byte-oriented manager at timestamp offset.
-        """
-        try:
-            if codec == 'pcmu':
-                # ulaw -> 16-bit PCM (width=2)
-                pcm = audioop.ulaw2lin(packet.payload, 2)
-            else:
-                pcm = audioop.alaw2lin(packet.payload, 2)
-        except Exception as e:
-            logging.error(f"Error decoding G.711 payload to PCM: {e}")
-            pcm = b"\x00" * 320
-
-        # Use sequential append to manager to keep a continuous PCM stream
-        try:
-            manager.write_seq(pcm)
-            try:
-                logging.debug(f"Wrote {len(pcm)} bytes PCM to manager; manager_available={manager.available()}")
-            except Exception:
-                pass
-        except Exception as e:
-            logging.error(f"Error writing PCM to manager: {e}")
-
-    def get_next_packet(self, timeout=0.05):
-        """
-        Get the next packet in sequence order.
-        Если нет пакета — всегда возвращать тишину (0x80), как pyVoIP.
-        """
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            with self.lock:
-                if not self.buffer.empty():
-                    seq, packet = self.buffer.queue[0]
-                    if seq == self.next_sequence:
-                        _, packet = self.buffer.get()
-                        try:
-                            seq_val = int(self.next_sequence) if self.next_sequence is not None else 0
-                        except Exception:
-                            seq_val = 0
-                        self.next_sequence = (seq_val + 1) % 65536
-                        self.last_good_packet = packet
-                        return packet
-                    elif seq < self.next_sequence:
-                        # Packet is older than what we expect, discard
-                        self.buffer.get()
-                        self.packets_late += 1
-                        continue
-                    # Packet is in the future, wait
-            time.sleep(0.001)
-
-        # Нет пакета — возвращаем тишину (0x80) длиной 160 байт
-        last_len = 160
-        payload_type = 0
-        if not isinstance(self.next_sequence, int):
-            next_ts = 0
-        else:
-            next_ts = self.next_sequence
-        next_ssrc = 0
-        plc_payload = b"\x80" * last_len
-        if not isinstance(self.next_sequence, int):
-            seq_val = 0
-        else:
-            seq_val = self.next_sequence
-        plc_packet = RtpPacket(
-            payload_type=payload_type,
-            sequence=seq_val,
-            timestamp=next_ts,
-            ssrc=next_ssrc,
-            payload=plc_payload
-        )
-        self.next_sequence = (seq_val + 1) % 65536
-        return plc_packet
-
-    def _log_stats(self):
-        """
-        Log jitter buffer statistics periodically.
-        """
-        current_time = time.time()
-        if current_time - self.last_log_time > self.log_interval:
-            with self.lock:
-                logging.info(f"JitterBuffer Stats: Received={self.packets_received}, Lost={self.packets_lost}, Late={self.packets_late}, Buffer Size={self.buffer.qsize()}")
-                self.last_log_time = current_time
-
-    def clear(self):
-        """
-        Clear all packets from the buffer and reset stats.
-        """
+    def _calculate_jitter(self):
+        """Рассчитывает текущий джиттер на основе времен прибытия пакетов."""
+        if len(self.packet_arrival_times) < 3:
+            return 0
+            
+        # Рассчитываем отклонения от ожидаемого интервала (20мс)
+        expected_interval = 0.020  # 20ms
+        deviations = []
+        
+        for i in range(1, len(self.packet_arrival_times)):
+            actual_interval = self.packet_arrival_times[i][0] - self.packet_arrival_times[i-1][0]
+            sequence_diff = (self.packet_arrival_times[i][1] - self.packet_arrival_times[i-1][1]) % 65536
+            
+            if sequence_diff > 0 and sequence_diff < 32768:  # Нормальный порядок
+                expected = expected_interval * sequence_diff
+                deviation = abs(actual_interval - expected)
+                deviations.append(deviation)
+        
+        if deviations:
+            # Используем среднее отклонение как оценку джиттера
+            return sum(deviations) / len(deviations)
+        return 0
+        
+    def _adapt_buffer_size(self):
+        """Адаптирует размер буфера на основе текущего джиттера."""
+        now = time.time()
+        if now - self.last_adaptation_time < self.adaptation_interval_sec:
+            return
+            
+        self.last_adaptation_time = now
+        
+        # Рассчитываем текущий джиттер
+        current_jitter = self._calculate_jitter()
+        self.current_jitter_ms = current_jitter * 1000
+        
+        # Адаптируем размер буфера
+        if self.current_jitter_ms > self.target_jitter_ms * 1.2:  # Увеличиваем буфер, если джиттер значительно выше цели
+            # Увеличиваем max_buffer_size, но не выше initial_max_buffer_size
+            new_max_buffer_size = min(self.initial_max_buffer_size, self.max_buffer_size + int(self.adaptation_factor * 10))
+            if new_max_buffer_size > self.max_buffer_size:
+                logging.info(f"Adapting buffer size up: {self.max_buffer_size} -> {new_max_buffer_size} (jitter={self.current_jitter_ms:.1f}ms)")
+                self.max_buffer_size = new_max_buffer_size
+        elif self.current_jitter_ms < self.target_jitter_ms * 0.8:  # Уменьшаем буфер, если джиттер значительно ниже цели
+            # Уменьшаем max_buffer_size, но не ниже initial_min_buffer_size
+            new_max_buffer_size = max(self.initial_min_buffer_size, self.max_buffer_size - int(self.adaptation_factor * 10))
+            if new_max_buffer_size < self.max_buffer_size:
+                logging.info(f"Adapting buffer size down: {self.max_buffer_size} -> {new_max_buffer_size} (jitter={self.current_jitter_ms:.1f}ms)")
+                self.max_buffer_size = new_max_buffer_size
+        
+    def add_packet(self, packet):
         with self.lock:
-            while not self.buffer.empty():
-                try:
-                    self.buffer.get_nowait()
-                except queue.Empty:
-                    break
-            self.next_sequence = 0
-            self.last_good_packet = None
-            self.packets_received = 0
-            self.packets_lost = 0
-            self.packets_late = 0
+            current_time = time.time()
+            self.stats['received'] += 1
+            
+            # Отслеживаем время прибытия пакета для анализа джиттера
+            self.packet_arrival_times.append((current_time, packet.sequence))
+            if len(self.packet_arrival_times) > self.max_arrival_history:
+                self.packet_arrival_times.pop(0)
+            
+            # Инициализация начальной последовательности
+            if self.next_sequence is None:
+                self.next_sequence = packet.sequence
+                logging.info(f"JitterBuffer: Initialized with sequence {packet.sequence}")
+            
+            # Проверяем, не поздний ли это пакет
+            seq_diff = (packet.sequence - self.next_sequence) % 65536
+            if seq_diff > 32768:  # Пакет из прошлого
+                self.stats['late'] += 1
+                logging.debug(f"Late packet: seq={packet.sequence}, expected={self.next_sequence}")
+                return False
+            
+            # Сохраняем пакет
+            self.packets[packet.sequence] = packet
+            
+            # Проверяем переполнение буфера
+            if len(self.packets) > self.max_buffer_size:
+                # Удаляем самый старый пакет
+                oldest_seq = min(self.packets.keys())
+                del self.packets[oldest_seq]
+                logging.debug(f"Buffer overflow, dropped packet {oldest_seq}")
+            
+            # Адаптируем размер буфера на основе текущего джиттера
+            self._adapt_buffer_size()
+            
+            self._log_stats()
+            return True
+    
+    def get_next_packet(self, timeout=0.02):
+        """Получает следующий пакет в правильной последовательности с учетом времени."""
+        start_time = time.time()
+        
+        with self.lock:
+            if self.next_sequence is None:
+                return None
+            
+            # Ждем нужный пакет в течение таймаута
+            while (time.time() - start_time) < timeout:
+                # Проверяем, есть ли нужный пакет
+                if self.next_sequence in self.packets:
+                    packet = self.packets.pop(self.next_sequence)
+                    self.next_sequence = (self.next_sequence + 1) % 65536
+                    return packet
+                
+                # Проверяем, не опаздывает ли пакет слишком сильно
+                current_time = time.time()
+                max_delay = self.max_delay_ms / 1000.0
+                
+                # Смотрим самый старый пакет в буфере
+                if self.packets:
+                    oldest_seq = min(self.packets.keys())
+                    seq_diff = (self.next_sequence - oldest_seq) % 65536
+                    
+                    # Если самый старый пакет намного новее ожидаемого, значит пакет действительно потерян
+                    # Используем настраиваемый порог для определения потери пакета
+                    if seq_diff > self.max_sequence_gap and seq_diff < 32768:
+                        self.stats['lost'] += 1
+                        lost_seq = self.next_sequence
+                        self.next_sequence = (self.next_sequence + 1) % 65536
+                        logging.debug(f"Lost packet: {lost_seq}")
+                        return None
+                    elif seq_diff > 32768:  # Старый пакет, пропускаем
+                        old_packet = self.packets.pop(oldest_seq)
+                        self.stats['late'] += 1
+                        continue
+                
+                # Небольшая задержка перед следующей проверкой
+                time.sleep(0.001)
+            
+            # Таймаут истек, возвращаем None (без увеличения счетчика потерь)
+            return None
+    
+    def _log_stats(self):
+        now = time.time()
+        if now - self.last_stats_time > 10.0:  # Каждые 10 секунд
+            logging.info(f"JitterBuffer stats: received={self.stats['received']}, "
+                        f"lost={self.stats['lost']}, late={self.stats['late']}, "
+                        f"buffer_size={len(self.packets)}")
+            self.last_stats_time = now
 
 class RtpSession:
-    """
-    Manages RTP session for a single call.
-    """
-    def __init__(self, local_ip, local_port, remote_ip, remote_port, payload_type=0):
+    """Manages RTP session for a single call."""
+    
+    def __init__(self, local_ip, local_port, remote_ip, remote_port, payload_type=0, enable_diagnostics=True):
         self.local_ip = local_ip
         self.local_port = local_port
         self.remote_ip = remote_ip
         self.remote_port = remote_port
         self.payload_type = payload_type
+        self.enable_diagnostics = enable_diagnostics
         
-        # Events для синхронизации буферизации
-        self._buffer_ready = threading.Event()
-        self._buffer_reset = threading.Event()
-        
+        # Создаем сокет
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind((local_ip, local_port))
-        self.sock.settimeout(0.5)
+        self.sock.settimeout(0.1)
+        
+        # RTP параметры
         self.seq = random.randint(0, 65535)
         self.timestamp = random.randint(0, 2**32 - 1)
-        
-        # Используем улучшенный менеджер пакетов
-        self._pcm_manager = EnhancedRTPPacketManager()
-        self._last_stats_time = time.time()
         self.ssrc = random.randint(1, 2**32 - 1)
-
-        # No VAD: simplify receive path to avoid numpy/vad dependencies
-        self.vad_enabled = False
-        self.vad = None
-        self.last_vad_state = False
-
-        self.jitter_analyzer = JitterAnalyzer()
+        
+        # Буферы и обработка
+        self.jitter_buffer = JitterBuffer(
+            max_delay_ms=80,
+            initial_max_buffer_size=RTP_MAX_JITTER_BUFFER_MS,
+            initial_min_buffer_size=RTP_MIN_JITTER_BUFFER_MS,
+            target_jitter_ms=50,  # Default value, can be made configurable in config.py
+            adaptation_factor=0.1,  # Default value, can be made configurable in config.py
+            adaptation_interval_sec=5,  # Default value, can be made configurable in config.py
+            get_next_packet_timeout=0.02 # Default value, can be made configurable in config.py
+        )
+        self.pcm_manager = RTPPacketManager()
+        
+        # Диагностика
+        if self.enable_diagnostics:
+            self.diagnostics = RTPDiagnostics()
+            self.audio_monitor = AudioQualityMonitor()
+        else:
+            self.diagnostics = None
+            self.audio_monitor = None
+        
+        # Потоки
         self.running = False
         self.recv_thread = None
-        self.send_lock = threading.Lock()
-        self.recv_lock = threading.Lock()
-        self.jitter_buffer = JitterBuffer(max_delay_ms=200, auto_adjust=True)
-
-        # Очередь для отправки RTP-пакетов
+        self.decode_thread = None
+        self.send_thread = None
         self.send_queue = queue.Queue()
-
-        # AUTO packetization support for G.711 (8kHz, 8-bit per sample)
-        self.sample_rate = 8000
-        self.bytes_per_ms = self.sample_rate // 1000  # 8 bytes/ms for PCMU/PCMA
-        # Enable AUTO when AUDIO_FRAME_SIZE <= 0 or set to 'auto'
-        self.auto_packetization = False
-        try:
-            if isinstance(AUDIO_FRAME_SIZE, str) and AUDIO_FRAME_SIZE.strip().lower() == 'auto':
-                self.auto_packetization = True
-            elif isinstance(AUDIO_FRAME_SIZE, int) and AUDIO_FRAME_SIZE <= 0:
-                self.auto_packetization = True
-        except Exception:
-            self.auto_packetization = False
-        # Dynamic packetization parameters (in milliseconds)
-        self.packetization_ms = 20
-        self.min_packetization_ms = 20
-        self.max_packetization_ms = 40
-        # Outgoing buffer for encoded audio
-        self._tx_buffer = bytearray()
-        # PCM streaming manager and prefill thread
-        self._pcm_manager = RTPPacketManager()
-        self._fill_thread = None
-        self._fill_running = False
-        # Telemetry
-        self.underrun_count = 0
-        self.last_manager_qsize = 0
-        # Start receive loop immediately
-        self.start()
-
-    def _send_loop(self):
-        """
-        Фоновый поток для отправки RTP-пакетов из send_queue.
-        """
-        import logging
-        logging.info("RTP send thread started (RtpSession)")
-        while self.send_running:
-            try:
-                frame_data = self.send_queue.get(timeout=0.1)
-                if frame_data is None:  # Sentinel value to остановить поток
-                    break
-
-                frame, is_auto_packetization = frame_data
-
-                if is_auto_packetization:
-                    packet = RtpPacket(
-                        payload_type=self.payload_type,
-                        sequence=self.seq,
-                        timestamp=self.timestamp,
-                        ssrc=self.ssrc,
-                        payload=frame
-                    )
-                    self.sock.sendto(packet.to_bytes(), (self.remote_ip, self.remote_port))
-                    logging.debug(f"Sent RTP packet seq={packet.sequence} size={len(packet.payload)} to {self.remote_ip}:{self.remote_port}")
-                    self.seq = (self.seq + 1) % 65536
-                    ts_val = int(self.timestamp) if self.timestamp is not None else 0
-                    self.timestamp = (ts_val + len(frame)) % (2**32)
-                else:
-                    frame_size = AUDIO_FRAME_SIZE
-                    if not isinstance(frame_size, int) or frame_size <= 0:
-                        frame_size = 160
-                    packet = RtpPacket(
-                        payload_type=self.payload_type,
-                        sequence=self.seq,
-                        timestamp=self.timestamp,
-                        ssrc=self.ssrc,
-                        payload=frame
-                    )
-                    self.sock.sendto(packet.to_bytes(), (self.remote_ip, self.remote_port))
-                    logging.debug(f"Sent RTP packet seq={packet.sequence} size={len(packet.payload)} to {self.remote_ip}:{self.remote_port}")
-                    self.seq = (self.seq + 1) % 65536
-                    ts_val = int(self.timestamp) if self.timestamp is not None else 0
-                    self.timestamp = (ts_val + len(frame)) % (2**32)
-            except queue.Empty:
-                continue
-            except Exception as e:
-                logging.error(f"RTP send loop error (RtpSession): {e}")
-        logging.info("RTP send thread exiting (RtpSession)")
+        
+        # Блокировки
+        self.send_lock = threading.Lock()
+        
+        # Статистика
+        self.last_packet_time = time.time()
+        self.packet_count = 0
+        
+        logging.info(f"RtpSession created: {local_ip}:{local_port} -> {remote_ip}:{remote_port}")
 
     def start(self):
         if self.running:
             return
+            
         self.running = True
-        self.recv_thread = threading.Thread(target=self._receive_loop, name="rtp_rx")
+        
+        # Поток приема пакетов
+        self.recv_thread = threading.Thread(target=self._receive_loop, name="rtp_recv")
         self.recv_thread.daemon = True
         self.recv_thread.start()
-
-        # Start prefill thread to decode jitter buffer into pcm manager
-        if not self._fill_running:
-            self._fill_running = True
-            self._fill_thread = threading.Thread(target=self._fill_manager_loop, name="rtp_prefill")
-            self._fill_thread.daemon = True
-            self._fill_thread.start()
-
-        self.send_running = True
-        self.send_thread = threading.Thread(target=self._send_loop, name="rtp_tx")  
+        
+        # Поток декодирования и буферизации
+        self.decode_thread = threading.Thread(target=self._decode_loop, name="rtp_decode")
+        self.decode_thread.daemon = True
+        self.decode_thread.start()
+        
+        # Поток отправки
+        self.send_thread = threading.Thread(target=self._send_loop, name="rtp_send")
         self.send_thread.daemon = True
         self.send_thread.start()
-
-    def send_audio(self, audio_data):
-        """
-        Send audio data through RTP.
-        """
-        if not self.running:
-            return
         
-        with self.send_lock:
-            self._tx_buffer.extend(audio_data)
-            
-            if self.auto_packetization:
-                while len(self._tx_buffer) >= self.packetization_ms * self.bytes_per_ms:
-                    frame_size = self.packetization_ms * self.bytes_per_ms
-                    frame = bytes(self._tx_buffer[:frame_size])
-                    del self._tx_buffer[:frame_size]
-                    self.send_queue.put((frame, True))
-            else:
-                frame_size = AUDIO_FRAME_SIZE
-                if not isinstance(frame_size, int) or frame_size <= 0:
-                    frame_size = 160
-                while len(self._tx_buffer) >= frame_size:
-                    frame = bytes(self._tx_buffer[:frame_size])
-                    del self._tx_buffer[:frame_size]
-                    self.send_queue.put((frame, False))
+        logging.info("RtpSession started")
 
     def stop(self):
-        """
-        Stop RTP session.
-        """
-        # Signal threads to stop
+        if not self.running:
+            return
+            
+        logging.info("Stopping RtpSession...")
         self.running = False
         
-        # Stop send thread by sending sentinel to queue
+        # Останавливаем поток отправки
         try:
-            if self.send_queue is not None:
-                self.send_queue.put_nowait(None)
-            self.send_running = False
-            if hasattr(self, 'send_thread') and self.send_thread and self.send_thread.is_alive():
-                self.send_thread.join(timeout=1.0)
-                if self.send_thread.is_alive():
-                    logging.warning("RtpSession: send thread did not stop within timeout")
-        except Exception:
+            self.send_queue.put(None)  # Сигнал завершения
+        except:
             pass
-
-        # Stop prefill thread first
-        try:
-            self._fill_running = False
-            if self._fill_thread and self._fill_thread.is_alive():
-                self._fill_thread.join(timeout=1.0)
-                if self._fill_thread.is_alive():
-                    logging.warning("RtpSession: prefill thread did not stop within timeout")
-        except Exception:
-            pass
-
-        # Close socket to unblock recv
+        
+        # Закрываем сокет
         try:
             self.sock.close()
-        except Exception:
+        except:
             pass
-
-        # Join recv thread
-        try:
-            if self.recv_thread and self.recv_thread.is_alive():
-                self.recv_thread.join(timeout=1.0)
-                if self.recv_thread.is_alive():
-                    logging.warning("RtpSession: recv thread did not stop within timeout")
-        except Exception:
-            pass
+        
+        # Ждем завершения потоков
+        threads = [self.recv_thread, self.decode_thread, self.send_thread]
+        for thread in threads:
+            if thread and thread.is_alive():
+                thread.join(timeout=1.0)
+        
+        logging.info("RtpSession stopped")
 
     def _receive_loop(self):
-        """
-        Background thread for receiving RTP packets.
-        """
+        """Поток приема RTP пакетов."""
+        logging.info("RTP receive thread started")
+        consecutive_timeouts = 0
+        
         while self.running:
             try:
                 data, addr = self.sock.recvfrom(4096)
-                packet = RtpPacket.from_bytes(data)
-                if not packet.is_rtcp():
-                    # Анализируем джиттер для каждого пакета
-                    self.jitter_analyzer.analyze_packet(packet.sequence, time.time())
-                    
-                    # Каждые 5 секунд выводим статистику
-                    now = time.time()
-                    if now - self._last_stats_time > 5:
-                        rtp_stats = self._pcm_manager.get_stats()
-                        jitter_stats = self.jitter_analyzer.get_stats()
-                        logging.info(f"RTP Statistics:\n"
-                                   f"Total packets: {rtp_stats['total_packets']}\n"
-                                   f"Buffer size: {rtp_stats['buffer_size']} bytes\n"
-                                   f"Packet count: {rtp_stats['packet_count']}\n"
-                                   f"Current jitter: {jitter_stats['current_jitter_ms']:.1f} ms\n"
-                                   f"Min/Max jitter: {jitter_stats['min_jitter_ms']:.1f}/{jitter_stats['max_jitter_ms']:.1f} ms\n"
-                                   f"Loss rate: {jitter_stats['loss_rate']:.2f}%\n"
-                                   f"Buffer size: {jitter_stats['buffer_size_ms']:.1f} ms")
-                        self._last_stats_time = now
-                    
-                    # Используем размер буфера из анализатора джиттера
-                    # Добавляем пакет в буфер если он не пустой
-                    if packet.payload and len(packet.payload) > 0:
-                        self.jitter_buffer.add_packet(packet)
-                    else:
-                        logging.debug("Received RTP packet with empty payload, skipping")
-
-                logging.debug(f"Received RTP packet seq={packet.sequence} size={len(packet.payload)} from {addr}")
-            except socket.timeout:
-                # Normal idle timeout
-                continue
-            except OSError as e:
-                # Suppress expected errors during shutdown on Windows (WinError 10038)
-                if not self.running:
-                    break
-                if getattr(e, 'winerror', None) == 10038:
-                    logging.info("RTP socket closed, receive loop exiting")
-                    break
-                logging.error(f"RTP receive error: {e}")
-            except Exception as e:
-                if not self.running:
-                    break
-                logging.error(f"RTP receive error: {e}")
-
-    def get_audio(self, timeout=0.1):
-        """
-        Get next decoded audio frame from jitter buffer.
-        Prefill threshold: не отдавать PCM, пока не накопится минимум prefill_threshold байт (как pyVoIP).
-        """
-        # Ensure we have a pcm_chunk_size consistent with AudioProcessor
-        if not hasattr(self, 'pcm_chunk_size'):
-            try:
-                if isinstance(AUDIO_FRAME_SIZE, int) and AUDIO_FRAME_SIZE > 0:
-                    frames_per_buffer = max(160, 2 * AUDIO_FRAME_SIZE)
-                else:
-                    frames_per_buffer = 640
-            except Exception:
-                frames_per_buffer = 320
-            self.pcm_chunk_size = frames_per_buffer * 2
-
-        # Используем адаптивный размер буфера на основе статистики джиттера
-        prefill_threshold = self.jitter_analyzer.get_recommended_buffer()
-        start = time.time()
-        prefilled = False
-        
-        # Сбрасываем счетчик underrun при старте новой буферизации
-        self.underrun_count = 0
-        
-        while time.time() - start < timeout:
-            try:
-                avail = self._pcm_manager.available()
-                if not hasattr(self, '_last_buffer_check'):
-                    self._last_buffer_check = time.time()
-                now = time.time()
-                interval = now - self._last_buffer_check
-                self._last_buffer_check = now
-                logging.debug(f"Buffer check interval: {interval*1000:.1f}ms, Available: {avail} bytes")
-            except Exception:
-                avail = 0
-            if not prefilled:
-                if avail >= prefill_threshold:
-                    prefilled = True
-                    logging.info(f"Buffer prefilled with {avail} bytes")
-                    self._buffer_ready.set()
-                else:
-                    logging.debug(f"Waiting for prefill: {avail}/{prefill_threshold} bytes")
-                    self._buffer_ready.clear()
-                    time.sleep(0.005)
+                consecutive_timeouts = 0
+                
+                if len(data) < 12:
                     continue
-            if avail >= self.pcm_chunk_size:
-                break
-            # If fill thread stopped, break early to avoid waiting forever
-            if not self._fill_running:
-                break
-            time.sleep(0.005)
-
-        try:
-            # If not enough data was available, read() will pad with silence
-            pcm = self._pcm_manager.read(self.pcm_chunk_size)
-            if not hasattr(self, '_last_read_time'):
-                self._last_read_time = time.time()
-            now = time.time()
-            interval = now - self._last_read_time
-            self._last_read_time = now
-            logging.debug(f"PCM read interval: {interval*1000:.1f}ms, Size: {len(pcm)} bytes")
-            
-            # If we read mostly zeros, count as underrun (heuristic)
-            zeros = pcm.count(b"\x00")
-            if zeros >= int(len(pcm) * 0.9):
-                self.underrun_count += 1
-                logging.warning(f"Buffer underrun detected: {zeros}/{len(pcm)} zero bytes")
-                # При существенном подряд underrun сбрасываем буфер
-                if self.underrun_count > 5:
-                    self._buffer_reset.set()
-                    prefilled = False
-                    self._buffer_ready.clear()
-                    logging.warning("Multiple underruns detected, resetting buffer")
-            return pcm
-        except Exception as e:
-            logging.error(f"Error reading PCM from manager: {e}")
-            self.underrun_count += 1
-            return b"\x00" * getattr(self, 'pcm_chunk_size', 320)
-
-    def _fill_manager_loop(self):
-        """Background thread that consumes jitter buffer, decodes packets and writes PCM into pcm manager."""
-        logging.info("RTP prefill thread started")
-        last_log = time.time()
-        while self.running and self._fill_running:
-            # Проверяем необходимость сброса буфера
-            if self._buffer_reset.is_set():
-                logging.info("Buffer reset requested, clearing PCM manager")
-                try:
-                    with self._pcm_manager.bufferLock:
-                        self._pcm_manager.buffer = io.BytesIO()
-                except Exception as e:
-                    logging.error(f"Error resetting buffer: {e}")
-                self._buffer_reset.clear()
-                self.underrun_count = 0
-            try:
-                packet = self.jitter_buffer.get_next_packet(timeout=0.02)
-                if packet:
-                    try:
-                        self.jitter_buffer.write_to_manager(packet, self._pcm_manager, codec='pcmu')
-                    except Exception as e:
-                        logging.error(f"Error prefill decode/write: {e}")
-                else:
-                    # No packet available; small sleep
-                    time.sleep(0.001)
-
-                # Periodic telemetry
-                if time.time() - last_log > 5:
-                    try:
-                        avail = self._pcm_manager.available()
-                    except Exception:
-                        avail = 0
-                    logging.info(f"PCM manager available bytes={avail}, underruns={self.underrun_count}")
-                    last_log = time.time()
+                
+                packet = RtpPacket.from_bytes(data)
+                
+                # Игнорируем RTCP пакеты
+                if packet.is_rtcp():
+                    continue
+                
+                # Проверяем размер payload
+                if not packet.payload or len(packet.payload) == 0:
+                    logging.debug("Received packet with empty payload")
+                    continue
+                
+                # Добавляем в jitter buffer и записываем в диагностику
+                if self.jitter_buffer.add_packet(packet):
+                    self.packet_count += 1
+                    self.last_packet_time = time.time()
+                    
+                    # Записываем информацию о пакете в диагностику
+                    if self.diagnostics:
+                        self.diagnostics.record_packet_arrival(
+                            sequence=packet.sequence,
+                            timestamp=packet.timestamp,
+                            payload_size=len(packet.payload),
+                            arrival_time=time.time()
+                        )
+                
+            except socket.timeout:
+                consecutive_timeouts += 1
+                if consecutive_timeouts > 100:  # 10 секунд без пакетов
+                    logging.warning("No RTP packets received for 10 seconds")
+                    consecutive_timeouts = 0
+                continue
             except Exception as e:
-                logging.error(f"_fill_manager_loop error: {e}")
-                time.sleep(0.01)
-        logging.info("RTP prefill thread exiting")
+                if self.running:
+                    logging.error(f"RTP receive error: {e}")
+                break
+        
+        logging.info("RTP receive thread stopped")
+
+    def _decode_loop(self):
+        """Поток декодирования пакетов из jitter buffer с адаптивной синхронизацией."""
+        logging.info("RTP decode thread started")
+        
+        # Параметры синхронизации
+        last_packet_time = time.time()
+        expected_frame_time = 0.020  # 20ms для G.711
+        consecutive_timeouts = 0
+        max_consecutive_timeouts = 10
+        
+        while self.running:
+            try:
+                # Получаем пакет из jitter buffer с адаптивным таймаутом
+                timeout = expected_frame_time * 0.8  # 80% от времени кадра
+                packet = self.jitter_buffer.get_next_packet(self.jitter_buffer.get_next_packet_timeout)
+                
+                current_time = time.time()
+                
+                if packet is None:
+                    # Нет пакета - адаптивная генерация тишины
+                    consecutive_timeouts += 1
+                    
+                    # Рассчитываем сколько тишины нужно сгенерировать
+                    time_since_last_packet = current_time - last_packet_time
+                    frames_needed = int(time_since_last_packet / expected_frame_time)
+                    
+                    if frames_needed > 0:
+                        silence = b'\x00' * (320 * frames_needed)
+                        self.pcm_manager.write_seq(silence)
+                        
+                        if self.audio_monitor:
+                            self.audio_monitor.record_audio_frame(silence, is_silence=True, arrival_time=current_time)
+                        
+                        logging.debug(f"Generated {frames_needed} silence frames due to packet loss.")
+                        
+                        # Адаптивная задержка: корректируем время сна
+                        sleep_time = (frames_needed * expected_frame_time) - (time.time() - current_time)
+                        if sleep_time > 0:
+                            time.sleep(sleep_time)
+                    
+                    # Сбрасываем счетчик таймаутов, так как мы сгенерировали тишину
+                    consecutive_timeouts = 0
+                    continue
+                else:
+                    # Пакет получен - сбрасываем счетчик таймаутов
+                    consecutive_timeouts = 0
+                    last_packet_time = current_time
+                
+                # Декодируем G.711
+                try:
+                    if self.payload_type == 0:  # PCMU
+                        pcm = audioop.ulaw2lin(packet.payload, 2)
+                    elif self.payload_type == 8:  # PCMA
+                        pcm = audioop.alaw2lin(packet.payload, 2)
+                    else:
+                        pcm = packet.payload  # Предполагаем PCM
+                    
+                    if len(pcm) > 0:
+                        # Записываем декодированный PCM в буфер
+                        self.pcm_manager.write_seq(pcm)
+                        
+                        # Адаптивная задержка для синхронизации
+                        processing_time = time.time() - current_time
+                        sleep_time = expected_frame_time - processing_time
+                        if sleep_time > 0.001:  # Только если есть смысл спать
+                            time.sleep(sleep_time)
+                        elif sleep_time < -0.010: # Если сильно отстаем, логируем
+                            logging.warning(f"Decode loop falling behind: {sleep_time*1000:.1f}ms")
+                except Exception as e:
+                    logging.error(f"Decode error: {e}")
+                    # В случае ошибки декодирования генерируем тишину
+                    silence = b'\x00' * 320
+                    self.pcm_manager.write_seq(silence)
+                    
+                    # Адаптивная задержка после ошибки
+                    time.sleep(expected_frame_time)
+                
+            except Exception as e:
+                if self.running:
+                    logging.error(f"Decode loop error: {e}")
+                time.sleep(0.001)
+        
+        logging.info("RTP decode thread stopped")
+
+    def _send_loop(self):
+        """Поток отправки RTP пакетов."""
+        logging.info("RTP send thread started")
+        
+        while self.running:
+            try:
+                # Получаем данные для отправки
+                data = self.send_queue.get(timeout=0.1)
+                
+                if data is None:  # Сигнал завершения
+                    break
+                
+                # Создаем RTP пакет
+                packet = RtpPacket(
+                    payload_type=self.payload_type,
+                    sequence=self.seq,
+                    timestamp=self.timestamp,
+                    ssrc=self.ssrc,
+                    payload=data
+                )
+                
+                # Отправляем
+                self.sock.sendto(packet.to_bytes(), (self.remote_ip, self.remote_port))
+                
+                # Обновляем счетчики
+                self.seq = (self.seq + 1) % 65536
+                self.timestamp = (self.timestamp + len(data)) % (2**32)
+                
+            except queue.Empty:
+                continue
+            except Exception as e:
+                if self.running:
+                    logging.error(f"RTP send error: {e}")
+        
+        logging.info("RTP send thread stopped")
+
+    def send_audio(self, audio_data):
+        """Отправляет аудио данные через RTP."""
+        if not self.running or not audio_data:
+            return
+        
+        try:
+            # Определяем размер фрейма
+            if isinstance(AUDIO_FRAME_SIZE, int) and AUDIO_FRAME_SIZE > 0:
+                frame_size = AUDIO_FRAME_SIZE
+            else:
+                frame_size = 160  # По умолчанию для G.711
+            
+            # Разбиваем на фреймы
+            data = bytes(audio_data)
+            offset = 0
+            
+            while offset < len(data):
+                frame = data[offset:offset + frame_size]
+                if len(frame) < frame_size:
+                    # Дополняем тишиной
+                    frame += b'\x80' * (frame_size - len(frame))
+                
+                # Кодируем в G.711 если нужно
+                if self.payload_type == 0:  # PCMU
+                    encoded = audioop.lin2ulaw(frame, 2) if len(frame) > frame_size // 2 else audioop.lin2ulaw(frame + b'\x00' * (320 - len(frame)), 2)[:frame_size // 2]
+                elif self.payload_type == 8:  # PCMA
+                    encoded = audioop.lin2alaw(frame, 2) if len(frame) > frame_size // 2 else audioop.lin2alaw(frame + b'\x00' * (320 - len(frame)), 2)[:frame_size // 2]
+                else:
+                    encoded = frame
+                
+                # Добавляем в очередь отправки
+                try:
+                    self.send_queue.put_nowait(encoded)
+                except queue.Full:
+                    # Если очередь полная, пропускаем
+                    logging.warning("Send queue full, dropping packet")
+                
+                offset += frame_size
+                
+        except Exception as e:
+            logging.error(f"send_audio error: {e}")
+
+    def get_audio(self, timeout=0.1, blocking=True):
+        """Получает декодированные аудио данные."""
+        try:
+            # Определяем размер чанка
+            chunk_size = 320  # 160 сэмплов * 2 байта
+            
+            if blocking:
+                # Ждем данные
+                start_time = time.time()
+                while self.running and (time.time() - start_time < timeout):
+                    if self.pcm_manager.available() >= chunk_size:
+                        break
+                    time.sleep(0.001)
+            
+            # Читаем данные
+            pcm = self.pcm_manager.read(chunk_size)
+            
+            # Проверяем качество данных
+            if pcm and len(pcm) == chunk_size:
+                return pcm
+            else:
+                # Возвращаем тишину если данных нет или мало
+                return b'\x80' * chunk_size
+                
+        except Exception as e:
+            logging.error(f"get_audio error: {e}")
+            return b'\x00' * 320
