@@ -1,4 +1,0 @@
-pyaudio
-ffmpeg-python
-librosa 
-numpy
