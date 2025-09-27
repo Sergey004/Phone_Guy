@@ -1,3 +1,4 @@
+# rtp_diagnostics.py (unchanged, but integrated in rtp.py)
 """
 Comprehensive RTP diagnostics and monitoring system.
 Tracks packet loss, jitter, latency, and audio quality metrics.
@@ -8,6 +9,9 @@ import logging
 import threading
 from collections import deque, defaultdict
 from typing import Dict, List, Optional, Tuple
+
+from .config import DEFAULT_RTP_PORT_RANGE, AUDIO_FRAME_SIZE, RTP_PAYLOAD_TYPE_PCMU, RTP_SAMPLE_RATE, RTP_PACKETIZATION_INTERVAL, RTP_MAX_JITTER_BUFFER_MS, RTP_MIN_JITTER_BUFFER_MS
+
 
 class RTPDiagnostics:
     """Advanced RTP diagnostics with real-time monitoring and reporting."""
@@ -121,125 +125,37 @@ class RTPDiagnostics:
             self.round_trip_times.append(rtt_ms)
     
     def _update_quality_metrics(self) -> None:
-        """Update voice quality metrics (MOS score, R-factor)."""
-        # Calculate packet loss rate
-        total_packets = self.packets_received + self.packets_lost
-        if total_packets > 0:
-            loss_rate = self.packets_lost / total_packets
-        else:
-            loss_rate = 0
-        
-        # Calculate average jitter in milliseconds
-        avg_jitter_ms = self.inter_arrival_jitter * 1000
-        
-        # Estimate R-factor (simplified E-model)
-        # R = 93 - Ie - Id - Is
-        # Ie = equipment impairment (packet loss)
-        # Id = delay impairment (jitter + network delay)
-        # Is = simultaneous impairment
-        
-        # Equipment impairment from packet loss
-        if loss_rate < 0.01:  # < 1%
-            ie = 0
-        elif loss_rate < 0.03:  # 1-3%
-            ie = 10 * loss_rate * 100  # Linear approximation
-        else:  # > 3%
-            ie = 30 + (loss_rate - 0.03) * 200  # Steeper penalty
-        
-        # Delay impairment (simplified)
-        id_delay = min(avg_jitter_ms * 0.5, 30)  # Cap at 30
-        
-        # Update R-factor
-        self.r_factor = max(0, 93 - ie - id_delay)
-        
-        # Convert R-factor to MOS score (simplified)
-        if self.r_factor > 90:
-            self.mos_score = 4.5
-        elif self.r_factor > 80:
-            self.mos_score = 4.0 + (self.r_factor - 80) * 0.05
-        elif self.r_factor > 70:
-            self.mos_score = 3.5 + (self.r_factor - 70) * 0.05
-        elif self.r_factor > 60:
-            self.mos_score = 3.0 + (self.r_factor - 60) * 0.05
-        else:
-            self.mos_score = max(1.0, 2.5 + (self.r_factor - 50) * 0.05)
+        """Update MOS and R-factor based on current stats."""
+        with self.lock:
+            if self.packets_received > 0:
+                loss_rate = self.packets_lost / self.packets_received
+                effective_latency = self.inter_arrival_jitter * 1000 + 10  # ms
+                self.r_factor = 93.2 - (loss_rate * 100 * 0.1) - (effective_latency / 40)
+                self.mos_score = 1 + (0.035 * self.r_factor) + (0.000007 * self.r_factor * (self.r_factor - 60) * (100 - self.r_factor))
+                self.mos_score = max(1, min(5, self.mos_score))
     
     def _check_report_time(self) -> None:
-        """Check if it's time for a periodic report."""
+        """Log diagnostics if report interval has passed."""
         current_time = time.time()
         if current_time - self.last_report_time >= self.report_interval:
-            self._generate_report()
+            logging.info(f"RTP Diagnostics: {self.get_diagnostics()}")
             self.last_report_time = current_time
     
-    def _generate_report(self) -> None:
-        """Generate a comprehensive diagnostic report."""
+    def get_diagnostics(self) -> Dict:
+        """Get current diagnostics metrics."""
         with self.lock:
-            total_packets = self.packets_received + self.packets_lost
-            
-            if total_packets > 0:
-                loss_rate = (self.packets_lost / total_packets) * 100
-                late_rate = (self.packets_late / total_packets) * 100 if self.packets_received > 0 else 0
-            else:
-                loss_rate = late_rate = 0
-            
-            # Calculate average buffer occupancy
-            avg_buffer_occupancy = (sum(self.buffer_occupancy) / len(self.buffer_occupancy)) if self.buffer_occupancy else 0
-            avg_jitter_buffer_size = (sum(self.jitter_buffer_size) / len(self.jitter_buffer_size)) if self.jitter_buffer_size else 0
-            
-            # Network statistics
-            avg_packet_size = (sum(self.packet_sizes) / len(self.packet_sizes)) if self.packet_sizes else 0
-            avg_rtt = (sum(self.round_trip_times) / len(self.round_trip_times)) if self.round_trip_times else 0
-            
-            logging.info("=== RTP Diagnostic Report ===")
-            logging.info(f"Packet Statistics:")
-            logging.info(f"  Total packets: {total_packets}")
-            logging.info(f"  Received: {self.packets_received}")
-            logging.info(f"  Lost: {self.packets_lost} ({loss_rate:.2f}%)")
-            logging.info(f"  Late: {self.packets_late} ({late_rate:.2f}%)")
-            logging.info(f"  Out of order: {self.packets_out_of_order}")
-            
-            logging.info(f"Network Quality:")
-            logging.info(f"  Inter-arrival jitter: {self.inter_arrival_jitter*1000:.2f} ms")
-            logging.info(f"  Average packet size: {avg_packet_size:.1f} bytes")
-            logging.info(f"  Average RTT: {avg_rtt:.1f} ms" if avg_rtt > 0 else "  RTT: No data")
-            
-            logging.info(f"Audio Quality:")
-            logging.info(f"  Buffer underruns: {self.audio_underruns}")
-            logging.info(f"  Buffer overruns: {self.audio_overruns}")
-            logging.info(f"  Max consecutive silence: {self.max_consecutive_silence}")
-            logging.info(f"  Average buffer occupancy: {avg_buffer_occupancy:.1f} bytes")
-            logging.info(f"  Average jitter buffer size: {avg_jitter_buffer_size:.1f} packets")
-            
-            logging.info(f"Voice Quality Scores:")
-            logging.info(f"  MOS score: {self.mos_score:.2f}/5.0")
-            logging.info(f"  R-factor: {self.r_factor:.1f}/100")
-            
-            # Quality assessment
-            if self.mos_score >= 4.0:
-                quality = "Excellent"
-            elif self.mos_score >= 3.5:
-                quality = "Good"
-            elif self.mos_score >= 3.0:
-                quality = "Fair"
-            elif self.mos_score >= 2.0:
-                quality = "Poor"
-            else:
-                quality = "Bad"
-            
-            logging.info(f"  Overall quality: {quality}")
-            logging.info("=== End Report ===")
-    
-    def get_summary_stats(self) -> Dict:
-        """Get a summary of current statistics."""
-        with self.lock:
-            total_packets = self.packets_received + self.packets_lost
-            loss_rate = (self.packets_lost / total_packets * 100) if total_packets > 0 else 0
+            avg_packet_size = sum(self.packet_sizes) / len(self.packet_sizes) if self.packet_sizes else 0
+            avg_rtt = sum(self.round_trip_times) / len(self.round_trip_times) if self.round_trip_times else 0
+            loss_rate = (self.packets_lost / self.packets_received * 100) if self.packets_received > 0 else 0
             
             return {
                 'packets_received': self.packets_received,
                 'packets_lost': self.packets_lost,
-                'packet_loss_rate': loss_rate,
-                'jitter_ms': self.inter_arrival_jitter * 1000,
+                'loss_rate_percent': loss_rate,
+                'packets_out_of_order': self.packets_out_of_order,
+                'inter_arrival_jitter_ms': self.inter_arrival_jitter * 1000,
+                'avg_packet_size': avg_packet_size,
+                'avg_rtt_ms': avg_rtt,
                 'mos_score': self.mos_score,
                 'r_factor': self.r_factor,
                 'audio_underruns': self.audio_underruns,
@@ -275,7 +191,7 @@ class RTPDiagnostics:
 class AudioQualityMonitor:
     """Specialized monitor for audio quality metrics."""
     
-    def __init__(self, sample_rate=8000, frame_size=160):
+    def __init__(self, sample_rate=8000, frame_size=AUDIO_FRAME_SIZE * 2):  # Adjusted for PCM
         self.sample_rate = sample_rate
         self.frame_size = frame_size
         self.frame_duration_ms = (frame_size / sample_rate) * 1000

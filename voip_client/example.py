@@ -13,6 +13,7 @@ from voip_client import CallState, VoIPClient
 
 logging.basicConfig(
     level=logging.DEBUG,
+    filename='myapp.log',
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
@@ -25,7 +26,15 @@ def handle_incoming_call(call):
     else:
         call.answer()
         logging.info("Call answered (legacy answer())")
-    time.sleep(5)  # Keep the call open for 5 seconds
+    
+    # Добавляем диагностику во время звонка
+    start_time = time.time()
+    while time.time() - start_time < 5:  # Keep the call open for 5 seconds
+        if hasattr(call, 'rtp_session') and hasattr(call.rtp_session, 'diagnostics'):
+            diagnostics = call.rtp_session.diagnostics.get_diagnostics()
+            logging.info(f"Incoming call diagnostics: {diagnostics}")
+        time.sleep(1)
+    
     call.hangup()
     logging.info("Call hung up")
 
@@ -115,6 +124,7 @@ def main():
         logging.info(f"Playing audio file: {args.audio_file} and sending to RTP stream")
         try:
             audio_path = args.audio_file
+            logging.info(f"Attempting to open audio file: {audio_path}")
             # First, try to open with wave — this only supports PCM/Extensible.
             try:
                 with wave.open(audio_path, 'rb') as f:
@@ -122,11 +132,17 @@ def main():
                     sampwidth = f.getsampwidth()
                     framerate = f.getframerate()
                     needs_convert = (nchannels != 1 or sampwidth != 2 or framerate != 8000)
+                    logging.info(f"Original audio file properties: channels={nchannels}, sampwidth={sampwidth}, framerate={framerate}")
             except wave.Error as we:
                 logging.warning(f"wave cannot open '{audio_path}' ({we}), attempting ffmpeg conversion to PCM16 mono 8kHz...")
-                temp_converted = _convert_to_pcm16_mono_8k(audio_path)
-                audio_path = temp_converted
-                needs_convert = False  # Already converted
+                try:
+                    temp_converted = _convert_to_pcm16_mono_8k(audio_path)
+                    audio_path = temp_converted
+                    needs_convert = False  # Already converted
+                    logging.info(f"ffmpeg conversion successful. New audio path: {audio_path}")
+                except RuntimeError as re_exc:
+                    logging.error(f"ffmpeg conversion failed: {re_exc}")
+                    raise # Re-raise to stop processing if conversion fails
 
             if needs_convert:
                 logging.warning("Expected 8kHz mono 16-bit PCM WAV; converting with ffmpeg...")
@@ -138,16 +154,25 @@ def main():
                 # 20ms = 160 samples = 320 bytes per frame at 8kHz 16-bit mono
                 # Determine chunk size: if AUDIO_FRAME_SIZE is a positive int, use it; otherwise default to 160 frames (20ms)
                 chunk_frames = AUDIO_FRAME_SIZE if isinstance(AUDIO_FRAME_SIZE, int) and AUDIO_FRAME_SIZE > 0 else 160
+                frame_count = 0
                 while True:
                     data = f.readframes(chunk_frames)
                     if not data:
                         break
+                    logging.debug(f"Sending {len(data)} bytes of PCM audio data.")
                     # send PCM bytes; Call will encode to PCMU
                     call.send_audio(data)
                     # Sleep to approximate real-time playback: frames_read / 8000 seconds
                     frames_read = len(data) // 2  # 2 bytes per sample at 16-bit mono
                     if frames_read > 0:
                         time.sleep(frames_read / 8000.0)
+                    
+                    # Периодическая диагностика во время отправки
+                    frame_count += 1
+                    if frame_count % 50 == 0:  # Каждые ~1 сек (50*20ms=1s)
+                        if hasattr(call, 'rtp_session') and hasattr(call.rtp_session, 'diagnostics'):
+                            diagnostics = call.rtp_session.diagnostics.get_diagnostics()
+                            logging.info(f"Outgoing call diagnostics: {diagnostics}")
 
             # Keep call for a short tail to flush buffers
             tail = time.time() + 0.5

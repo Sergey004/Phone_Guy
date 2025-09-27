@@ -1,3 +1,4 @@
+# audio.py
 """voip_client.audio
 
 Audio processing utilities used by the VoIP client.
@@ -22,12 +23,13 @@ import threading
 import queue
 import logging
 import time
+import numpy as np  # Added for improved decoding
 from .config import AUDIO_FRAME_SIZE, CODEC_PCMU, CODEC_PCMA
 
-# Standard decoded PCM silence (320 bytes == 160 samples of 16-bit PCM)
-SILENCE_PCM = b"\x00" * 320
-# Standard encoded silence for G.711 (160 bytes of 8-bit samples)
-SILENCE_ENCODED = b"\x80" * 160
+# Standard decoded PCM silence (640 bytes == 320 samples of 16-bit PCM, adjusted for new frame size)
+SILENCE_PCM = b"\x00" * 640
+# Standard encoded silence for G.711 (320 bytes of 8-bit samples)
+SILENCE_ENCODED = b"\x80" * 320
 
 class AudioProcessor:
     """
@@ -107,82 +109,49 @@ class AudioProcessor:
         except Exception:
             pass
 
+    def _audio_callback(self, in_data, frame_count, time_info, status):
+        """PyAudio callback for non-blocking output."""
+        bytes_per_sample = 2
+        target_bytes = frame_count * bytes_per_sample
+        try:
+            pcm = self.pcm_queue.get_nowait()
+            if not isinstance(pcm, (bytes, bytearray)):
+                pcm = SILENCE_PCM
+            if len(pcm) < target_bytes:
+                pcm += b'\x00' * (target_bytes - len(pcm))
+            return (pcm[:target_bytes], pyaudio.paContinue)
+        except queue.Empty:
+            return (b'\x00' * target_bytes, pyaudio.paContinue)
+        except Exception as e:
+            logging.error(f"Audio callback error: {e}")
+            return (b'\x00' * target_bytes, pyaudio.paContinue)
+
     def _process_audio(self):
         """
         Main audio processing loop.
         Only handles playback of PCM frames pushed via add_audio_frame().
         """
-        # Choose a sane playback buffer size independent of RTP packetization
-        if isinstance(AUDIO_FRAME_SIZE, int) and AUDIO_FRAME_SIZE > 0:
-            frames_per_buffer = max(160, 2 * AUDIO_FRAME_SIZE)
-        else:
-            # AUTO or invalid -> use 20 ms (320 samples) buffer for smooth playback
-            frames_per_buffer = 320
-        # Create stream and expose it on the instance so `stop()` can close it
+        # Increased buffer size for reduced underrun
+        frames_per_buffer = 1024  # Increased from 320/640
+        # Create stream in callback mode for better handling
         try:
             self.stream = self.pyaudio.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=self.sample_rate,
-            input=False,
-            output=True,
-            frames_per_buffer=frames_per_buffer
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=self.sample_rate,
+                input=False,
+                output=True,
+                frames_per_buffer=frames_per_buffer,
+                stream_callback=self._audio_callback
             )
         except Exception as e:
             logging.error(f"Failed to open audio stream: {e}")
             self.stream = None
-        else:
-            try:
-                self.stream.start_stream()
-            except Exception:
-                pass
+            return
         try:
-            bytes_per_sample = 2
-            target_bytes = frames_per_buffer * bytes_per_sample
+            self.stream.start_stream()
             while self.running and not self._stop_event.is_set():
-                try:
-                    # Get next decoded PCM frame (may be smaller than the playback buffer)
-                    # This queue stores decoded PCM frames (16-bit little-endian)
-                    pcm_to_play = self.pcm_queue.get(timeout=0.1)
-                    # Wake sentinel to exit
-                    if pcm_to_play is None:
-                        break
-                    if not isinstance(pcm_to_play, (bytes, bytearray)):
-                        logging.warning("AudioProcessor: invalid pcm frame type, skipping")
-                        continue
-                    # Append to playback buffer
-                    self.playback_buffer.extend(pcm_to_play)
-
-                    # While we have at least one full buffer, write it
-                    while len(self.playback_buffer) >= target_bytes:
-                        chunk = bytes(self.playback_buffer[:target_bytes])
-                        try:
-                            if self.stream is not None:
-                                self.stream.write(chunk)
-                        except Exception as e:
-                            logging.error(f"Audio stream write error: {e}")
-                            # On error, drop this chunk and continue
-                        del self.playback_buffer[:target_bytes]
-
-                except queue.Empty:
-                    # No frame available: if we have partial buffer, optionally pad and write small chunk to avoid underrun
-                    if len(self.playback_buffer) > 0:
-                        # Pad with silence up to target and write once
-                        pad_len = target_bytes - len(self.playback_buffer)
-                        if pad_len > 0:
-                            self.playback_buffer.extend(b"\x00" * pad_len)
-                        try:
-                            if self.stream is not None:
-                                self.stream.write(bytes(self.playback_buffer[:target_bytes]))
-                        except Exception as e:
-                            logging.error(f"Audio stream write error on pad: {e}")
-                        del self.playback_buffer[:target_bytes]
-                    else:
-                        # No data at all; small sleep to avoid busy loop
-                        time.sleep(0.01)
-                except Exception as e:
-                    logging.error(f"Audio processing error: {e}")
-                    time.sleep(0.01)
+                time.sleep(0.1)  # Let callback handle the work
         finally:
             try:
                 if self.stream is not None:
@@ -230,10 +199,20 @@ class AudioProcessor:
         buffer so downstream playback is not interrupted.
         """
         try:
+            if len(encoded_data) == 0:
+                return SILENCE_PCM
+            # Use numpy for faster and more robust decoding
+            data_np = np.frombuffer(encoded_data, dtype=np.uint8)
             if self.codec == CODEC_PCMU:
-                return audioop.ulaw2lin(encoded_data, 2)
+                # Mu-law decode
+                s = np.sign(data_np - 128) * (1.0 / 255) * ((1 + 255) ** np.abs(data_np - 128) - 1)
+                decoded = np.clip(s * 32767, -32768, 32767).astype(np.int16)
+                # Remove DC offset
+                decoded -= np.mean(decoded)
+                return decoded.tobytes()
             elif self.codec == CODEC_PCMA:
-                return audioop.alaw2lin(encoded_data, 2)
+                # A-law decode (similar, adjust table)
+                return audioop.alaw2lin(encoded_data, 2)  # Fallback to audioop for A-law
             else:
                 raise ValueError(f"Unsupported codec: {self.codec}")
         except Exception as e:

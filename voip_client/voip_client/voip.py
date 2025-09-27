@@ -266,6 +266,7 @@ a=rtpmap:0 PCMU/8000
         if self.state != CallState.ANSWERED:
             return
         encoded = self.audio_processor.encode_pcm(audio_data)
+        logging.debug(f"Encoded {len(audio_data)} bytes of PCM to {len(encoded)} bytes of G.711.")
         if self.rtp_session:
             self.rtp_session.send_audio(encoded)
 
