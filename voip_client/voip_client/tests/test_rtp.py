@@ -1,5 +1,8 @@
 import unittest
-from voip_client.rtp import RtpPacket, JitterBuffer, RtpSession
+from voip_client.rtp import RTPPacket, JitterBuffer, RTPSession # Updated class names
+import socket
+import time
+import threading
 import struct
 import sys
 from io import StringIO
@@ -8,9 +11,9 @@ import logging
 class TestRtpPacket(unittest.TestCase):
     def test_from_bytes(self):
         payload = b'\\x00' * 160
-        packet = RtpPacket(payload_type=0, sequence=123, timestamp=456, ssrc=789, payload=payload)
+        packet = RTPPacket(payload_type=0, sequence=123, timestamp=456, ssrc=789, payload=payload) # Changed from RtpPacket
         packet_bytes = packet.to_bytes()
-        parsed = RtpPacket.from_bytes(packet_bytes)
+        parsed = RTPPacket.from_bytes(packet_bytes) # Changed from RtpPacket
         self.assertEqual(parsed.payload_type, 0)
         self.assertEqual(parsed.sequence, 123)
         self.assertEqual(parsed.timestamp, 456)
@@ -19,7 +22,7 @@ class TestRtpPacket(unittest.TestCase):
     
     def test_to_bytes(self):
         payload = b'\\x01' * 160
-        packet = RtpPacket(payload_type=96, sequence=500, timestamp=1000, ssrc=12345678, payload=payload)
+        packet = RTPPacket(payload_type=96, sequence=500, timestamp=1000, ssrc=12345678, payload=payload) # Changed from RtpPacket
         packet_bytes = packet.to_bytes()
         header = struct.unpack('!BBHII', packet_bytes[:12])
         self.assertEqual(header[0], 128)
@@ -31,43 +34,43 @@ class TestRtpPacket(unittest.TestCase):
 
 class TestJitterBuffer(unittest.TestCase):
     def setUp(self):
-        self.jitter = JitterBuffer()
+        self.jitter = JitterBuffer(min_buffer_ms=0)
     
     def test_add_packet(self):
-        packet1 = RtpPacket(sequence=10)
-        packet2 = RtpPacket(sequence=11)
+        packet1 = RTPPacket(sequence=10) # Changed from RtpPacket
+        packet2 = RTPPacket(sequence=11) # Changed from RtpPacket
         self.jitter.add_packet(packet1)
         self.jitter.add_packet(packet2)
-        self.assertEqual(self.jitter.buffer.qsize(), 2)
-        p1 = self.jitter.get_next_packet()
-        p2 = self.jitter.get_next_packet()
+        self.assertEqual(len(self.jitter.buffer), 2) # Changed from self.jitter.buffer.qsize()
+        p1 = self.jitter.get_packet() # Changed from get_next_packet()
+        p2 = self.jitter.get_packet() # Changed from get_next_packet()
         self.assertEqual(p1.sequence, 10)
         self.assertEqual(p2.sequence, 11)
     
     def test_packet_loss(self):
-        packet1 = RtpPacket(sequence=10)
-        packet2 = RtpPacket(sequence=12)
+        packet1 = RTPPacket(sequence=10) # Changed from RtpPacket
+        packet2 = RTPPacket(sequence=12) # Changed from RtpPacket
         self.jitter.add_packet(packet1)
         self.jitter.add_packet(packet2)
-        p1 = self.jitter.get_next_packet()
-        p2 = self.jitter.get_next_packet()
+        p1 = self.jitter.get_packet() # Changed from get_next_packet()
+        p2 = self.jitter.get_packet() # Changed from get_next_packet()
         self.assertEqual(p1.sequence, 10)
         self.assertEqual(p2.sequence, 12)
         self.assertEqual(self.jitter.last_sequence, 12)
     
     def test_sequence_wraparound(self):
-        packet1 = RtpPacket(sequence=65535)
-        packet2 = RtpPacket(sequence=0)
+        packet1 = RTPPacket(sequence=65535) # Changed from RtpPacket
+        packet2 = RTPPacket(sequence=0) # Changed from RtpPacket
         self.jitter.add_packet(packet1)
         self.jitter.add_packet(packet2)
-        p1 = self.jitter.get_next_packet()
-        p2 = self.jitter.get_next_packet()
+        p1 = self.jitter.get_packet() # Changed from get_next_packet()
+        p2 = self.jitter.get_packet() # Changed from get_next_packet()
         self.assertEqual(p1.sequence, 65535)
         self.assertEqual(p2.sequence, 0)
 
 class TestRtpSession(unittest.TestCase):
     def setUp(self):
-        self.session = RtpSession("127.0.0.1", 5000, "127.0.0.1", 5001)
+        self.session = RTPSession("127.0.0.1", 5000, "127.0.0.1", 5001) # Changed from RtpSession
     
     def test_send_audio(self):
         audio_data = b'\\x00' * 320

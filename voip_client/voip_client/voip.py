@@ -12,7 +12,7 @@ import queue
 import secrets
 import socket
 from .sip import SipClient, SipMessage
-from .rtp import RtpSession
+from .rtp import RTPSession # Changed from .new_rtp import RTPSession
 from .audio import AudioProcessor
 from .config import DEFAULT_RTP_PORT_RANGE, AUDIO_FRAME_SIZE, CODEC_PCMU
 
@@ -136,7 +136,7 @@ a=rtpmap:0 PCMU/8000
                             logging.info(f"Extracted remote port: {remote_port}")
                 if remote_ip and remote_port:
                     logging.info(f"Creating RTP session with local_ip={self.local_ip}, local_port={self.rtp_port_range[0]}, remote_ip={remote_ip}, remote_port={remote_port}")
-                    self.rtp_session = RtpSession(self.local_ip, self.rtp_port_range[0], remote_ip, remote_port)
+                    self.rtp_session = RTPSession(self.local_ip, self.rtp_port_range[0], remote_ip, remote_port) # Changed to RTPSession
                 self.sip_client.ack(self.sip_uri, self.call_id, self.remote_tag, self.local_tag)
                 self.state = CallState.ANSWERED
                 self.audio_processor.start()
@@ -190,7 +190,7 @@ a=rtpmap:0 PCMU/8000
         }
         self.sip_client.send_response("200", "OK", headers, self.remote_addr, body=sdp)
         # Create RTP session
-        self.rtp_session = RtpSession(self.local_ip, self.rtp_port_range[0], remote_ip, remote_port)
+        self.rtp_session = RTPSession(self.local_ip, self.rtp_port_range[0], remote_ip, remote_port) # Changed to RTPSession
         self.state = CallState.ANSWERED
         self.audio_processor.start()
         self._start_rtp_playback()
@@ -279,7 +279,7 @@ a=rtpmap:0 PCMU/8000
             return b"\x00" * length
         
         if self.rtp_session:
-            return self.rtp_session.get_audio(timeout=0.1, blocking=blocking)
+            return self.rtp_session.get_audio(timeout=0.1, chunk_size=length, blocking=blocking) # Added chunk_size
         else:
             return b"\x00" * length
 
