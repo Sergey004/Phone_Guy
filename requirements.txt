@@ -3,3 +3,4 @@ imageio-ffmpeg
 ffmpeg-python
 httpx
 requests
+openai
