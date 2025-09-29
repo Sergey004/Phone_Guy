@@ -3,4 +3,8 @@ imageio-ffmpeg
 ffmpeg-python
 httpx
 requests
-openai
+rich
+pypdf
+chromadb
+langchain-community
+langchain-nvidia-ai-endpoints

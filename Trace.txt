@@ -1,145 +1,313 @@
 No.     Time           Source                Destination           Protocol Length Info
-   1862 11.144426      192.168.1.181         192.168.1.176         SIP      560    Request: REGISTER sip:192.168.1.176  (1 binding) | 
+   1864 6.629967       192.168.1.181         192.168.1.176         SIP      547    Request: REGISTER sip:192.168.1.176  (1 binding) | 
 
-Frame 1862: 560 bytes on wire (4480 bits), 560 bytes captured (4480 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
+Frame 1864: 547 bytes on wire (4376 bits), 547 bytes captured (4376 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
 Ethernet II, Src: MicroStarINT_c0:55:31 (d8:43:ae:c0:55:31), Dst: ProxmoxServe_03:33:85 (bc:24:11:03:33:85)
 Internet Protocol Version 4, Src: 192.168.1.181, Dst: 192.168.1.176
-User Datagram Protocol, Src Port: 57585, Dst Port: 5060
+User Datagram Protocol, Src Port: 5060, Dst Port: 5060
 Session Initiation Protocol (REGISTER)
     Request-Line: REGISTER sip:192.168.1.176 SIP/2.0
+        Method: REGISTER
+        Request-URI: sip:192.168.1.176
+            Request-URI Host Part: 192.168.1.176
+        [Resent Packet: False]
     Message Header
+        Via: SIP/2.0/UDP 192.168.1.181:5060;rport;branch=z9hG4bKPja9ca0b25-32c9-4e6d-bab8-18792dc7a2d9
+        Max-Forwards: 70
+        From: <sip:555533@192.168.1.176>;tag=718fa5bc-c994-4d29-bc2c-c299afa084e5
+            SIP from address: sip:555533@192.168.1.176
+            SIP from tag: 718fa5bc-c994-4d29-bc2c-c299afa084e5
+        To: <sip:555533@192.168.1.176>
+            SIP to address: sip:555533@192.168.1.176
+                SIP to address User Part: 555533
+                SIP to address Host Part: 192.168.1.176
+        Call-ID: 2a4cd9c7-dd58-45c0-ba83-9437df165a30
+        [Generated Call-ID: 2a4cd9c7-dd58-45c0-ba83-9437df165a30]
+        CSeq: 60324 REGISTER
+            Sequence Number: 60324
+            Method: REGISTER
+        Contact: <sip:555533@192.168.1.181:5060;ob>
+            Contact URI: sip:555533@192.168.1.181:5060;ob
+        Expires: 300
+        Allow: PRACK, INVITE, ACK, BYE, CANCEL, UPDATE, INFO, SUBSCRIBE, NOTIFY, REFER, MESSAGE, OPTIONS
+        Content-Length:  0
 
 No.     Time           Source                Destination           Protocol Length Info
-   1864 11.145784      192.168.1.181         192.168.1.176         SIP      848    Request: REGISTER sip:192.168.1.176  (1 binding) | 
+   1865 6.630968       192.168.1.176         192.168.1.181         SIP      616    Status: 401 Unauthorized | 
 
-Frame 1864: 848 bytes on wire (6784 bits), 848 bytes captured (6784 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
+Frame 1865: 616 bytes on wire (4928 bits), 616 bytes captured (4928 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
+Ethernet II, Src: ProxmoxServe_03:33:85 (bc:24:11:03:33:85), Dst: MicroStarINT_c0:55:31 (d8:43:ae:c0:55:31)
+Internet Protocol Version 4, Src: 192.168.1.176, Dst: 192.168.1.181
+User Datagram Protocol, Src Port: 5060, Dst Port: 5060
+Session Initiation Protocol (401)
+    Status-Line: SIP/2.0 401 Unauthorized
+        Status-Code: 401
+        [Resent Packet: False]
+        [Request Frame: 1864]
+        [Response Time (ms): 1]
+    Message Header
+        Via: SIP/2.0/UDP 192.168.1.181:5060;rport=5060;received=192.168.1.181;branch=z9hG4bKPja9ca0b25-32c9-4e6d-bab8-18792dc7a2d9
+        Call-ID: 2a4cd9c7-dd58-45c0-ba83-9437df165a30
+        [Generated Call-ID: 2a4cd9c7-dd58-45c0-ba83-9437df165a30]
+        From: <sip:555533@192.168.1.176>;tag=718fa5bc-c994-4d29-bc2c-c299afa084e5
+            SIP from address: sip:555533@192.168.1.176
+            SIP from tag: 718fa5bc-c994-4d29-bc2c-c299afa084e5
+        To: <sip:555533@192.168.1.176>;tag=z9hG4bKPja9ca0b25-32c9-4e6d-bab8-18792dc7a2d9
+            SIP to address: sip:555533@192.168.1.176
+                SIP to address User Part: 555533
+                SIP to address Host Part: 192.168.1.176
+            SIP to tag: z9hG4bKPja9ca0b25-32c9-4e6d-bab8-18792dc7a2d9
+        CSeq: 60324 REGISTER
+            Sequence Number: 60324
+            Method: REGISTER
+        WWW-Authenticate: Digest realm="asterisk",nonce="1759125660/6e4922180c640162bc8fe05765f2fbc1",opaque="492329595da57d5e",algorithm=MD5,qop="auth"
+            Authentication Scheme: Digest
+            Realm: "asterisk"
+            Nonce Value: "1759125660/6e4922180c640162bc8fe05765f2fbc1"
+            Opaque Value: "492329595da57d5e"
+            Algorithm: MD5
+            QOP: "auth"
+        Server: FPBX-17.0.21(22.5.2)
+        Content-Length:  0
+
+No.     Time           Source                Destination           Protocol Length Info
+   3966 17.265812      192.168.1.181         192.168.1.176         SIP      547    Request: REGISTER sip:192.168.1.176  (1 binding) | 
+
+Frame 3966: 547 bytes on wire (4376 bits), 547 bytes captured (4376 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
 Ethernet II, Src: MicroStarINT_c0:55:31 (d8:43:ae:c0:55:31), Dst: ProxmoxServe_03:33:85 (bc:24:11:03:33:85)
 Internet Protocol Version 4, Src: 192.168.1.181, Dst: 192.168.1.176
-User Datagram Protocol, Src Port: 57585, Dst Port: 5060
+User Datagram Protocol, Src Port: 5060, Dst Port: 5060
 Session Initiation Protocol (REGISTER)
     Request-Line: REGISTER sip:192.168.1.176 SIP/2.0
+        Method: REGISTER
+        Request-URI: sip:192.168.1.176
+            Request-URI Host Part: 192.168.1.176
+        [Resent Packet: True]
+        [Suspected resend of frame: 1864]
     Message Header
+        Via: SIP/2.0/UDP 192.168.1.181:5060;rport;branch=z9hG4bKPja9ca0b25-32c9-4e6d-bab8-18792dc7a2d9
+        Max-Forwards: 70
+        From: <sip:555533@192.168.1.176>;tag=718fa5bc-c994-4d29-bc2c-c299afa084e5
+            SIP from address: sip:555533@192.168.1.176
+            SIP from tag: 718fa5bc-c994-4d29-bc2c-c299afa084e5
+        To: <sip:555533@192.168.1.176>
+            SIP to address: sip:555533@192.168.1.176
+                SIP to address User Part: 555533
+                SIP to address Host Part: 192.168.1.176
+        Call-ID: 2a4cd9c7-dd58-45c0-ba83-9437df165a30
+        [Generated Call-ID: 2a4cd9c7-dd58-45c0-ba83-9437df165a30]
+        CSeq: 60324 REGISTER
+            Sequence Number: 60324
+            Method: REGISTER
+        Contact: <sip:555533@192.168.1.181:5060;ob>
+            Contact URI: sip:555533@192.168.1.181:5060;ob
+        Expires: 300
+        Allow: PRACK, INVITE, ACK, BYE, CANCEL, UPDATE, INFO, SUBSCRIBE, NOTIFY, REFER, MESSAGE, OPTIONS
+        Content-Length:  0
 
 No.     Time           Source                Destination           Protocol Length Info
-   1870 11.148821      192.168.1.181         192.168.1.176         SIP      880    Status: 200 OK (OPTIONS) | 
+   3967 17.266665      192.168.1.176         192.168.1.181         SIP      616    Status: 401 Unauthorized | 
 
-Frame 1870: 880 bytes on wire (7040 bits), 880 bytes captured (7040 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
-Ethernet II, Src: MicroStarINT_c0:55:31 (d8:43:ae:c0:55:31), Dst: ProxmoxServe_03:33:85 (bc:24:11:03:33:85)
-Internet Protocol Version 4, Src: 192.168.1.181, Dst: 192.168.1.176
-User Datagram Protocol, Src Port: 57585, Dst Port: 5060
-Session Initiation Protocol (200)
-    Status-Line: SIP/2.0 200 OK
+Frame 3967: 616 bytes on wire (4928 bits), 616 bytes captured (4928 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
+Ethernet II, Src: ProxmoxServe_03:33:85 (bc:24:11:03:33:85), Dst: MicroStarINT_c0:55:31 (d8:43:ae:c0:55:31)
+Internet Protocol Version 4, Src: 192.168.1.176, Dst: 192.168.1.181
+User Datagram Protocol, Src Port: 5060, Dst Port: 5060
+Session Initiation Protocol (401)
+    Status-Line: SIP/2.0 401 Unauthorized
+        Status-Code: 401
+        [Resent Packet: True]
+        [Suspected resend of frame: 1865]
+        [Request Frame: 1864]
+        [Response Time (ms): 10637]
     Message Header
+        Via: SIP/2.0/UDP 192.168.1.181:5060;rport=5060;received=192.168.1.181;branch=z9hG4bKPja9ca0b25-32c9-4e6d-bab8-18792dc7a2d9
+        Call-ID: 2a4cd9c7-dd58-45c0-ba83-9437df165a30
+        [Generated Call-ID: 2a4cd9c7-dd58-45c0-ba83-9437df165a30]
+        From: <sip:555533@192.168.1.176>;tag=718fa5bc-c994-4d29-bc2c-c299afa084e5
+            SIP from address: sip:555533@192.168.1.176
+            SIP from tag: 718fa5bc-c994-4d29-bc2c-c299afa084e5
+        To: <sip:555533@192.168.1.176>;tag=z9hG4bKPja9ca0b25-32c9-4e6d-bab8-18792dc7a2d9
+            SIP to address: sip:555533@192.168.1.176
+                SIP to address User Part: 555533
+                SIP to address Host Part: 192.168.1.176
+            SIP to tag: z9hG4bKPja9ca0b25-32c9-4e6d-bab8-18792dc7a2d9
+        CSeq: 60324 REGISTER
+            Sequence Number: 60324
+            Method: REGISTER
+        WWW-Authenticate: Digest realm="asterisk",nonce="1759125670/71f29ccff4e376cf8bafeafa1a5a7420",opaque="07b7a26d37c9bdad",algorithm=MD5,qop="auth"
+            Authentication Scheme: Digest
+            Realm: "asterisk"
+            Nonce Value: "1759125670/71f29ccff4e376cf8bafeafa1a5a7420"
+            Opaque Value: "07b7a26d37c9bdad"
+            Algorithm: MD5
+            QOP: "auth"
+        Server: FPBX-17.0.21(22.5.2)
+        Content-Length:  0
 
 No.     Time           Source                Destination           Protocol Length Info
-   1872 11.150118      192.168.1.181         192.168.1.176         SIP      456    Status: 200 OK (NOTIFY) | 
+   3968 17.271773      192.168.1.181         192.168.1.176         SIP      837    Request: REGISTER sip:192.168.1.176  (1 binding) | 
 
-Frame 1872: 456 bytes on wire (3648 bits), 456 bytes captured (3648 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
+Frame 3968: 837 bytes on wire (6696 bits), 837 bytes captured (6696 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
 Ethernet II, Src: MicroStarINT_c0:55:31 (d8:43:ae:c0:55:31), Dst: ProxmoxServe_03:33:85 (bc:24:11:03:33:85)
 Internet Protocol Version 4, Src: 192.168.1.181, Dst: 192.168.1.176
-User Datagram Protocol, Src Port: 57585, Dst Port: 5060
-Session Initiation Protocol (200)
-    Status-Line: SIP/2.0 200 OK
-    Message Header
-
-No.     Time           Source                Destination           Protocol Length Info
-   2729 15.932783      192.168.1.181         192.168.1.176         SIP/SDP  1214   Request: INVITE sip:2335584@192.168.1.176 | 
-
-Frame 2729: 1214 bytes on wire (9712 bits), 1214 bytes captured (9712 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
-Ethernet II, Src: MicroStarINT_c0:55:31 (d8:43:ae:c0:55:31), Dst: ProxmoxServe_03:33:85 (bc:24:11:03:33:85)
-Internet Protocol Version 4, Src: 192.168.1.181, Dst: 192.168.1.176
-User Datagram Protocol, Src Port: 57585, Dst Port: 5060
-Session Initiation Protocol (INVITE)
-    Request-Line: INVITE sip:2335584@192.168.1.176 SIP/2.0
-    Message Header
-    Message Body
-
-No.     Time           Source                Destination           Protocol Length Info
-   2731 15.936030      192.168.1.181         192.168.1.176         SIP      422    Request: ACK sip:2335584@192.168.1.176 | 
-
-Frame 2731: 422 bytes on wire (3376 bits), 422 bytes captured (3376 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
-Ethernet II, Src: MicroStarINT_c0:55:31 (d8:43:ae:c0:55:31), Dst: ProxmoxServe_03:33:85 (bc:24:11:03:33:85)
-Internet Protocol Version 4, Src: 192.168.1.181, Dst: 192.168.1.176
-User Datagram Protocol, Src Port: 57585, Dst Port: 5060
-Session Initiation Protocol (ACK)
-    Request-Line: ACK sip:2335584@192.168.1.176 SIP/2.0
-    Message Header
-
-No.     Time           Source                Destination           Protocol Length Info
-   9084 17.961607      192.168.1.181         192.168.1.176         SIP/SDP  1507   Request: INVITE sip:2335584@192.168.1.176 | 
-
-Frame 9084: 1507 bytes on wire (12056 bits), 1507 bytes captured (12056 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
-Ethernet II, Src: MicroStarINT_c0:55:31 (d8:43:ae:c0:55:31), Dst: ProxmoxServe_03:33:85 (bc:24:11:03:33:85)
-Internet Protocol Version 4, Src: 192.168.1.181, Dst: 192.168.1.176
-User Datagram Protocol, Src Port: 57585, Dst Port: 5060
-Session Initiation Protocol (INVITE)
-    Request-Line: INVITE sip:2335584@192.168.1.176 SIP/2.0
-    Message Header
-    Message Body
-
-No.     Time           Source                Destination           Protocol Length Info
-   9408 19.332478      192.168.1.181         192.168.1.176         SIP      414    Request: ACK sip:192.168.1.176:5060 | 
-
-Frame 9408: 414 bytes on wire (3312 bits), 414 bytes captured (3312 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
-Ethernet II, Src: MicroStarINT_c0:55:31 (d8:43:ae:c0:55:31), Dst: ProxmoxServe_03:33:85 (bc:24:11:03:33:85)
-Internet Protocol Version 4, Src: 192.168.1.181, Dst: 192.168.1.176
-User Datagram Protocol, Src Port: 57585, Dst Port: 5060
-Session Initiation Protocol (ACK)
-    Request-Line: ACK sip:192.168.1.176:5060 SIP/2.0
-    Message Header
-
-No.     Time           Source                Destination           Protocol Length Info
-   9409 19.332618      192.168.1.181         192.168.1.176         SIP/SDP  904    Request: UPDATE sip:192.168.1.176:5060 | 
-
-Frame 9409: 904 bytes on wire (7232 bits), 904 bytes captured (7232 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
-Ethernet II, Src: MicroStarINT_c0:55:31 (d8:43:ae:c0:55:31), Dst: ProxmoxServe_03:33:85 (bc:24:11:03:33:85)
-Internet Protocol Version 4, Src: 192.168.1.181, Dst: 192.168.1.176
-User Datagram Protocol, Src Port: 57585, Dst Port: 5060
-Session Initiation Protocol (UPDATE)
-    Request-Line: UPDATE sip:192.168.1.176:5060 SIP/2.0
-    Message Header
-    Message Body
-
-No.     Time           Source                Destination           Protocol Length Info
-   9536 19.848075      192.168.1.181         192.168.1.176         SIP      456    Status: 200 OK (NOTIFY) | 
-
-Frame 9536: 456 bytes on wire (3648 bits), 456 bytes captured (3648 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
-Ethernet II, Src: MicroStarINT_c0:55:31 (d8:43:ae:c0:55:31), Dst: ProxmoxServe_03:33:85 (bc:24:11:03:33:85)
-Internet Protocol Version 4, Src: 192.168.1.181, Dst: 192.168.1.176
-User Datagram Protocol, Src Port: 57585, Dst Port: 5060
-Session Initiation Protocol (200)
-    Status-Line: SIP/2.0 200 OK
-    Message Header
-
-No.     Time           Source                Destination           Protocol Length Info
-  11417 26.023740      192.168.1.181         192.168.1.176         SIP      407    Status: 200 OK (BYE) | 
-
-Frame 11417: 407 bytes on wire (3256 bits), 407 bytes captured (3256 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
-Ethernet II, Src: MicroStarINT_c0:55:31 (d8:43:ae:c0:55:31), Dst: ProxmoxServe_03:33:85 (bc:24:11:03:33:85)
-Internet Protocol Version 4, Src: 192.168.1.181, Dst: 192.168.1.176
-User Datagram Protocol, Src Port: 57585, Dst Port: 5060
-Session Initiation Protocol (200)
-    Status-Line: SIP/2.0 200 OK
-    Message Header
-
-No.     Time           Source                Destination           Protocol Length Info
-  12641 34.020339      192.168.1.181         192.168.1.176         SIP      460    Request: REGISTER sip:192.168.1.176  (remove 1 binding) | 
-
-Frame 12641: 460 bytes on wire (3680 bits), 460 bytes captured (3680 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
-Ethernet II, Src: MicroStarINT_c0:55:31 (d8:43:ae:c0:55:31), Dst: ProxmoxServe_03:33:85 (bc:24:11:03:33:85)
-Internet Protocol Version 4, Src: 192.168.1.181, Dst: 192.168.1.176
-User Datagram Protocol, Src Port: 57585, Dst Port: 5060
+User Datagram Protocol, Src Port: 5060, Dst Port: 5060
 Session Initiation Protocol (REGISTER)
     Request-Line: REGISTER sip:192.168.1.176 SIP/2.0
+        Method: REGISTER
+        Request-URI: sip:192.168.1.176
+            Request-URI Host Part: 192.168.1.176
+        [Resent Packet: False]
     Message Header
+        Via: SIP/2.0/UDP 192.168.1.181:5060;rport;branch=z9hG4bKPj263b1d12-d1de-4954-940b-c3aac5a8b59d
+        Max-Forwards: 70
+        From: <sip:555533@192.168.1.176>;tag=718fa5bc-c994-4d29-bc2c-c299afa084e5
+            SIP from address: sip:555533@192.168.1.176
+            SIP from tag: 718fa5bc-c994-4d29-bc2c-c299afa084e5
+        To: <sip:555533@192.168.1.176>
+            SIP to address: sip:555533@192.168.1.176
+                SIP to address User Part: 555533
+                SIP to address Host Part: 192.168.1.176
+        Call-ID: 2a4cd9c7-dd58-45c0-ba83-9437df165a30
+        [Generated Call-ID: 2a4cd9c7-dd58-45c0-ba83-9437df165a30]
+        CSeq: 60325 REGISTER
+            Sequence Number: 60325
+            Method: REGISTER
+        Contact: <sip:555533@192.168.1.181:5060;ob>
+            Contact URI: sip:555533@192.168.1.181:5060;ob
+        Expires: 300
+        Allow: PRACK, INVITE, ACK, BYE, CANCEL, UPDATE, INFO, SUBSCRIBE, NOTIFY, REFER, MESSAGE, OPTIONS
+         […]Authorization: Digest username="555533", realm="asterisk", nonce="1759125660/6e4922180c640162bc8fe05765f2fbc1", uri="sip:192.168.1.176", response="9dc330ed6ee5fbb77705dd1a602c5420", algorithm=MD5, cnonce="0a44dd312dbc4b7086939db187cb
+            Authentication Scheme: Digest
+            Username: "555533"
+            Realm: "asterisk"
+            Nonce Value: "1759125660/6e4922180c640162bc8fe05765f2fbc1"
+            Authentication URI: "sip:192.168.1.176"
+            Digest Authentication Response: "9dc330ed6ee5fbb77705dd1a602c5420"
+            Algorithm: MD5
+            CNonce Value: "0a44dd312dbc4b7086939db187cbf9d0"
+            Opaque Value: "492329595da57d5e"
+            QOP: auth
+            Nonce Count: 00000001
+        Content-Length:  0
 
 No.     Time           Source                Destination           Protocol Length Info
-  12643 34.021653      192.168.1.181         192.168.1.176         SIP      748    Request: REGISTER sip:192.168.1.176  (remove 1 binding) | 
+   3969 17.273889      192.168.1.176         192.168.1.181         SIP      616    Status: 401 Unauthorized | 
 
-Frame 12643: 748 bytes on wire (5984 bits), 748 bytes captured (5984 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
+Frame 3969: 616 bytes on wire (4928 bits), 616 bytes captured (4928 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
+Ethernet II, Src: ProxmoxServe_03:33:85 (bc:24:11:03:33:85), Dst: MicroStarINT_c0:55:31 (d8:43:ae:c0:55:31)
+Internet Protocol Version 4, Src: 192.168.1.176, Dst: 192.168.1.181
+User Datagram Protocol, Src Port: 5060, Dst Port: 5060
+Session Initiation Protocol (401)
+    Status-Line: SIP/2.0 401 Unauthorized
+        Status-Code: 401
+        [Resent Packet: False]
+        [Request Frame: 3968]
+        [Response Time (ms): 2]
+    Message Header
+        Via: SIP/2.0/UDP 192.168.1.181:5060;rport=5060;received=192.168.1.181;branch=z9hG4bKPj263b1d12-d1de-4954-940b-c3aac5a8b59d
+        Call-ID: 2a4cd9c7-dd58-45c0-ba83-9437df165a30
+        [Generated Call-ID: 2a4cd9c7-dd58-45c0-ba83-9437df165a30]
+        From: <sip:555533@192.168.1.176>;tag=718fa5bc-c994-4d29-bc2c-c299afa084e5
+            SIP from address: sip:555533@192.168.1.176
+            SIP from tag: 718fa5bc-c994-4d29-bc2c-c299afa084e5
+        To: <sip:555533@192.168.1.176>;tag=z9hG4bKPj263b1d12-d1de-4954-940b-c3aac5a8b59d
+            SIP to address: sip:555533@192.168.1.176
+                SIP to address User Part: 555533
+                SIP to address Host Part: 192.168.1.176
+            SIP to tag: z9hG4bKPj263b1d12-d1de-4954-940b-c3aac5a8b59d
+        CSeq: 60325 REGISTER
+            Sequence Number: 60325
+            Method: REGISTER
+        WWW-Authenticate: Digest realm="asterisk",nonce="1759125670/71f29ccff4e376cf8bafeafa1a5a7420",opaque="0ce6867a37ba47d6",algorithm=MD5,qop="auth"
+            Authentication Scheme: Digest
+            Realm: "asterisk"
+            Nonce Value: "1759125670/71f29ccff4e376cf8bafeafa1a5a7420"
+            Opaque Value: "0ce6867a37ba47d6"
+            Algorithm: MD5
+            QOP: "auth"
+        Server: FPBX-17.0.21(22.5.2)
+        Content-Length:  0
+
+No.     Time           Source                Destination           Protocol Length Info
+   3970 17.274237      192.168.1.181         192.168.1.176         SIP      837    Request: REGISTER sip:192.168.1.176  (1 binding) | 
+
+Frame 3970: 837 bytes on wire (6696 bits), 837 bytes captured (6696 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
 Ethernet II, Src: MicroStarINT_c0:55:31 (d8:43:ae:c0:55:31), Dst: ProxmoxServe_03:33:85 (bc:24:11:03:33:85)
 Internet Protocol Version 4, Src: 192.168.1.181, Dst: 192.168.1.176
-User Datagram Protocol, Src Port: 57585, Dst Port: 5060
+User Datagram Protocol, Src Port: 5060, Dst Port: 5060
 Session Initiation Protocol (REGISTER)
     Request-Line: REGISTER sip:192.168.1.176 SIP/2.0
+        Method: REGISTER
+        Request-URI: sip:192.168.1.176
+            Request-URI Host Part: 192.168.1.176
+        [Resent Packet: False]
     Message Header
+        Via: SIP/2.0/UDP 192.168.1.181:5060;rport;branch=z9hG4bKPj4288826d-edb7-4b1f-bd1f-21658382f48d
+        Max-Forwards: 70
+        From: <sip:555533@192.168.1.176>;tag=718fa5bc-c994-4d29-bc2c-c299afa084e5
+            SIP from address: sip:555533@192.168.1.176
+            SIP from tag: 718fa5bc-c994-4d29-bc2c-c299afa084e5
+        To: <sip:555533@192.168.1.176>
+            SIP to address: sip:555533@192.168.1.176
+                SIP to address User Part: 555533
+                SIP to address Host Part: 192.168.1.176
+        Call-ID: 2a4cd9c7-dd58-45c0-ba83-9437df165a30
+        [Generated Call-ID: 2a4cd9c7-dd58-45c0-ba83-9437df165a30]
+        CSeq: 60326 REGISTER
+            Sequence Number: 60326
+            Method: REGISTER
+        Contact: <sip:555533@192.168.1.181:5060;ob>
+            Contact URI: sip:555533@192.168.1.181:5060;ob
+        Expires: 300
+        Allow: PRACK, INVITE, ACK, BYE, CANCEL, UPDATE, INFO, SUBSCRIBE, NOTIFY, REFER, MESSAGE, OPTIONS
+         […]Authorization: Digest username="555533", realm="asterisk", nonce="1759125670/71f29ccff4e376cf8bafeafa1a5a7420", uri="sip:192.168.1.176", response="29e1d5c321e71ca97adb1920bee2dbaa", algorithm=MD5, cnonce="0a44dd312dbc4b7086939db187cb
+            Authentication Scheme: Digest
+            Username: "555533"
+            Realm: "asterisk"
+            Nonce Value: "1759125670/71f29ccff4e376cf8bafeafa1a5a7420"
+            Authentication URI: "sip:192.168.1.176"
+            Digest Authentication Response: "29e1d5c321e71ca97adb1920bee2dbaa"
+            Algorithm: MD5
+            CNonce Value: "0a44dd312dbc4b7086939db187cbf9d0"
+            Opaque Value: "0ce6867a37ba47d6"
+            QOP: auth
+            Nonce Count: 00000001
+        Content-Length:  0
+
+No.     Time           Source                Destination           Protocol Length Info
+   3971 17.274953      192.168.1.176         192.168.1.181         SIP      616    Status: 401 Unauthorized | 
+
+Frame 3971: 616 bytes on wire (4928 bits), 616 bytes captured (4928 bits) on interface \Device\NPF_{3CDEE198-E4D6-4175-93B2-BA43B9B57121}, id 0
+Ethernet II, Src: ProxmoxServe_03:33:85 (bc:24:11:03:33:85), Dst: MicroStarINT_c0:55:31 (d8:43:ae:c0:55:31)
+Internet Protocol Version 4, Src: 192.168.1.176, Dst: 192.168.1.181
+User Datagram Protocol, Src Port: 5060, Dst Port: 5060
+Session Initiation Protocol (401)
+    Status-Line: SIP/2.0 401 Unauthorized
+        Status-Code: 401
+        [Resent Packet: False]
+        [Request Frame: 3970]
+        [Response Time (ms): 0]
+    Message Header
+        Via: SIP/2.0/UDP 192.168.1.181:5060;rport=5060;received=192.168.1.181;branch=z9hG4bKPj4288826d-edb7-4b1f-bd1f-21658382f48d
+        Call-ID: 2a4cd9c7-dd58-45c0-ba83-9437df165a30
+        [Generated Call-ID: 2a4cd9c7-dd58-45c0-ba83-9437df165a30]
+        From: <sip:555533@192.168.1.176>;tag=718fa5bc-c994-4d29-bc2c-c299afa084e5
+            SIP from address: sip:555533@192.168.1.176
+            SIP from tag: 718fa5bc-c994-4d29-bc2c-c299afa084e5
+        To: <sip:555533@192.168.1.176>;tag=z9hG4bKPj4288826d-edb7-4b1f-bd1f-21658382f48d
+            SIP to address: sip:555533@192.168.1.176
+                SIP to address User Part: 555533
+                SIP to address Host Part: 192.168.1.176
+            SIP to tag: z9hG4bKPj4288826d-edb7-4b1f-bd1f-21658382f48d
+        CSeq: 60326 REGISTER
+            Sequence Number: 60326
+            Method: REGISTER
+        WWW-Authenticate: Digest realm="asterisk",nonce="1759125670/71f29ccff4e376cf8bafeafa1a5a7420",opaque="14e0ff824ac8e4b6",algorithm=MD5,qop="auth"
+            Authentication Scheme: Digest
+            Realm: "asterisk"
+            Nonce Value: "1759125670/71f29ccff4e376cf8bafeafa1a5a7420"
+            Opaque Value: "14e0ff824ac8e4b6"
+            Algorithm: MD5
+            QOP: "auth"
+        Server: FPBX-17.0.21(22.5.2)
+        Content-Length:  0

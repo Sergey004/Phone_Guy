@@ -2,8 +2,15 @@ import asyncio
 import logging
 import httpx
 import ffmpeg
+import rich.logging
 
 from Sippy.SIP import SIPClient
+
+logging.basicConfig(
+    level="INFO",
+    format="%(message)s",
+    handlers=[rich.logging.RichHandler(rich_tracebacks=True)]
+)
 
 class TTSAdapter:
     def __init__(self, config: dict, logger: logging.Logger):

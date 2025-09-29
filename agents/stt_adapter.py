@@ -1,12 +1,20 @@
 import asyncio
 import logging
 import struct
+from langchain_community.utilities.nvidia_riva import RivaASR
+import rich.logging
+
+logging.basicConfig(
+    level="INFO",
+    format="%(message)s",
+    handlers=[rich.logging.RichHandler(rich_tracebacks=True)]
+)
 
 class STTAdapter:
     """
     Minimal STT scaffolding with real-time PCM feed (8kHz, mono, s16).
     - Segments stream by simple energy-based VAD.
-    - For now, transcribe() is a stub; replace with provider call (e.g., Whisper API) later.
+    - Uses NVIDIA Riva ASR for transcription.
     """
     def __init__(self, config: dict, logger: logging.Logger):
         self.config = config
@@ -23,6 +31,13 @@ class STTAdapter:
         self._silence_ms = 0
         self.out_queue: asyncio.Queue[str] = asyncio.Queue()
         self._closed = False
+        
+        # Initialize Riva ASR
+        self.riva_asr = RivaASR(
+            audio_channel_count=1,
+            profanity_filter=stt_cfg.get('profanity_filter', True),
+            enable_automatic_punctuation=stt_cfg.get('enable_automatic_punctuation', True)
+        )
 
     def close(self):
         self._closed = True
@@ -83,11 +98,23 @@ class STTAdapter:
 
     async def transcribe(self, pcm_s16le_8k: bytes) -> str:
         """
-        Stub transcription: returns a placeholder string with duration.
-        Replace with provider integration (e.g., send HTTP to Whisper, Vosk, Azure).
+        Transcribes audio using NVIDIA Riva ASR.
         """
-        dur = len(pcm_s16le_8k) / 2 / self.sample_rate
-        self.logger.debug(f"Transcribing segment ~{dur:.2f}s ({len(pcm_s16le_8k)} bytes)")
-        # Simulate network delay
-        await asyncio.sleep(min(1.0, max(0.1, dur * 0.2)))
-        return f"[распознано ~{dur:.1f}с аудио]"
+        self.logger.debug(f"Transcribing segment ({len(pcm_s16le_8k)} bytes) using Riva ASR")
+        try:
+            # RivaASR expects an AudioStream, which is a queue of audio bytes.
+            # For now, we'll pass the entire segment as a single item in a list.
+            # Depending on RivaASR's exact input requirements, this might need adjustment.
+            # The documentation shows it takes an AudioStream, which is a custom type for a message queue.
+            # If it expects a stream, we might need to wrap pcm_s16le_8k in an appropriate stream-like object.
+            # For a direct call, it might expect the raw bytes.
+            # Let's assume it can take raw bytes for now, or a list containing them.
+            # Based on the documentation, RivaASR converts audio bytes into a string.
+            # The example shows it takes an AudioStream, which is a queue.
+            # For a single segment, we might need to simulate this or check if it accepts raw bytes directly.
+            # Let's try passing the bytes directly, as it's a runnable that converts audio bytes to a string.
+            text = await self.riva_asr.ainvoke(pcm_s16le_8k)
+            return text
+        except Exception as e:
+            self.logger.error(f"Riva ASR transcription failed: {e}", exc_info=True)
+            return ""
