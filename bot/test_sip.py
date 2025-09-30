@@ -2,8 +2,9 @@
 import sys
 import time
 import logging
-import pjsua as pj
-import wave
+import pjsua2 as pj
+from rtp_streamer import RtpStreamerMediaPort
+from wav_converter import ensure_pjsua_compatible
 
 logging.basicConfig(
     level=logging.INFO,
@@ -11,165 +12,189 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 
-# Глобальные переменные для хранения состояния
-current_call = None
-player_id = None
-recorder_id = None
+
+class MyAccount(pj.Account):
+    def __init__(self, ep):
+        super().__init__()
+        self.ep = ep
+        self.current_call = None
+
+    def onRegState(self, prm):
+        info = self.getInfo()
+        logging.info(f"Account registration: {info.regIsActive} ({prm.code} {prm.reason})")
+
+    def onIncomingCall(self, prm):
+        call = MyCall(self, prm.callId, self.ep, wav_file="output.wav")
+        self.current_call = call
+        ci = call.getInfo()
+        logging.info(f"Incoming call from {ci.remoteUri}")
+        prm = pj.CallOpParam()
+        prm.statusCode = 200
+        call.answer(prm)
 
 
-def on_call_state(call_id, e):
-    """Callback когда меняется состояние звонка"""
-    global current_call
-    call_info = pj.call_get_info(call_id)
-    logging.info(f"Call state: {call_info.state_text}")
-    
-    if call_info.state == pj.CallState.DISCONNECTED:
-        logging.info("Call disconnected")
-        current_call = None
+class MyCall(pj.Call):
+    def __init__(self, acc, call_id=pj.PJSUA_INVALID_ID, ep=None, wav_file="output.wav"):
+        super().__init__(acc, call_id)
+        self.rtp_port = None
+        self.ep = ep
+        self.recorder = None  # Fallback recorder, if needed
+        self.wav_file = wav_file
 
+    def onCallState(self, prm):
+        ci = self.getInfo()
+        logging.info(f"Call state: {ci.stateText}")
+        if ci.state == pj.PJSIP_INV_STATE_DISCONNECTED:
+            logging.info("Call disconnected")
+            # Save recording on disconnect
+            if self.rtp_port:
+                self.rtp_port.save_to_wav("captured_audio.wav")
 
-def on_call_media_state(call_id, e):
-    """Callback когда меняется медиа-состояние"""
-    global player_id, recorder_id
-    
-    call_info = pj.call_get_info(call_id)
-    logging.info(f"Media state changed for call {call_id}")
-    
-    if call_info.media_state == pj.MediaState.ACTIVE:
-        logging.info("Media is active, setting up audio routing")
+    def onCallMediaState(self, prm):
+        logging.info("Entering onCallMediaState")
+        ci = self.getInfo()
         
-        # Получаем conference slot звонка
-        call_slot = call_info.conf_slot
-        logging.info(f"Call conference slot: {call_slot}")
-        
-        try:
-            # ===== ВОСПРОИЗВЕДЕНИЕ (output.wav -> собеседник) =====
-            try:
-                player_id = pj.player_create("output.wav", loop=True)
-                player_slot = pj.player_get_slot(player_id)
-                logging.info(f"Player created with slot: {player_slot}")
+        for mi in ci.media:
+            if mi.type == pj.PJMEDIA_TYPE_AUDIO and mi.status == pj.PJSUA_CALL_MEDIA_ACTIVE:
+                logging.info("Audio active, setting up media")
                 
-                # Подключаем плеер к звонку
-                pj.conf_connect(player_slot, call_slot)
-                logging.info("Connected: player -> call")
-            except pj.Error as e:
-                logging.error(f"Failed to create/connect player: {e}")
+                try:
+                    # Get call's audio media (port ID should be 1)
+                    audio_media = self.getAudioMedia(mi.index)
+                    logging.info(f"Got audio media, port ID: {audio_media.getPortId()}")
+                    
+                    # Convert WAV to PJSUA2-compatible format (PCM16, mono, 8000Hz)
+                    compatible_file = ensure_pjsua_compatible(self.wav_file, target_rate=8000)
+                    logging.info(f"Using audio file: {compatible_file}")
+                    
+                    # Use custom port for both playback and recording
+                    self.rtp_port = RtpStreamerMediaPort(compatible_file)
+                    logging.info("RTP port created")
+                    
+                    # KEY FIX: Register the custom port to the conference bridge
+                    self.rtp_port.createPort("rtp_streamer")
+                    logging.info(f"Custom port registered with ID: {self.rtp_port.getPortId()}")
+                    
+                    # Connect bidirectional:
+                    # - Custom port transmits to call (playback)
+                    self.rtp_port.startTransmit(audio_media)
+                    logging.info("✓ Playback enabled via RTP port")
+                    
+                    # - Call transmits to custom port (recording)
+                    audio_media.startTransmit(self.rtp_port)
+                    logging.info("✓ Recording enabled via RTP port")                    
+                except Exception as e:
+                    logging.error(f"Error in onCallMediaState: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    
+                    # Fallback: Use built-in recorder if custom fails
+                    try:
+                        self.recorder = pj.AudioMediaRecorder()
+                        self.recorder.createRecorder("captured_audio.wav")
+                        audio_media.startTransmit(self.recorder)
+                        logging.info("✓ Fallback recording enabled via AudioMediaRecorder")
+                    except Exception as fallback_e:
+                        logging.error(f"Failed fallback recorder: {fallback_e}")
+
+
+class VoIPBot:
+    def __init__(self, sip_domain, sip_user, sip_pass, local_ip="192,168.1.181"):
+        self.ep = pj.Endpoint()
+        self.ep.libCreate()
+
+        ep_cfg = pj.EpConfig()
+        ep_cfg.uaConfig.threadCnt = 1
+        ep_cfg.logConfig.level = 4  # Reduced logging
+        self.ep.libInit(ep_cfg)
+        
+        # KEY FIX: Use null sound device for headless/server-side operation
+        self.ep.audDevManager().setNullDev()
+        logging.info("Null sound device set (no hardware audio needed)")
+
+        # Transport
+        tcfg = pj.TransportConfig()
+        tcfg.port = 5060
+        tcfg.boundAddr = local_ip
+        self.ep.transportCreate(pj.PJSIP_TRANSPORT_UDP, tcfg)
+
+        self.ep.libStart()
+        logging.info("PJSUA2 started")
+
+        # Account
+        acc_cfg = pj.AccountConfig()
+        acc_cfg.idUri = f"sip:{sip_user}@{sip_domain}"
+        acc_cfg.regConfig.registrarUri = f"sip:{sip_domain}"
+        cred = pj.AuthCredInfo("digest", "*", sip_user, 0, sip_pass)
+        acc_cfg.sipConfig.authCreds.append(cred)
+
+        self.account = MyAccount(self.ep)
+        self.account.create(acc_cfg)
+
+    def make_call(self, uri):
+        call = MyCall(self.account, ep=self.ep)
+        prm = pj.CallOpParam(True)
+        call.makeCall(uri, prm)
+        self.account.current_call = call
+
+    def destroy(self):
+        logging.info("Cleaning up...")
+        
+        if self.account and self.account.current_call:
+            call = self.account.current_call
             
-            # ===== ЗАПИСЬ (собеседник -> captured_audio.wav) =====
-            try:
-                recorder_id = pj.recorder_create("captured_audio.wav")
-                recorder_slot = pj.recorder_get_slot(recorder_id)
-                logging.info(f"Recorder created with slot: {recorder_slot}")
-                
-                # Подключаем звонок к рекордеру
-                pj.conf_connect(call_slot, recorder_slot)
-                logging.info("Connected: call -> recorder")
-            except pj.Error as e:
-                logging.error(f"Failed to create/connect recorder: {e}")
+            # Save recording if exists
+            if call.rtp_port:
+                try:
+                    call.rtp_port.save_to_wav("captured_audio.wav")
+                    logging.info("Recording saved")
+                except Exception as e:
+                    logging.error(f"Error saving recording: {e}")
             
-            logging.info("Audio routing setup complete")
+            # Clean resources
+            if call.rtp_port:
+                try:
+                    del call.rtp_port
+                except:
+                    pass
             
-        except Exception as e:
-            logging.error(f"Error in media setup: {e}")
-            import traceback
-            traceback.print_exc()
+            if call.recorder:
+                try:
+                    del call.recorder
+                except:
+                    pass
 
-
-def on_incoming_call(acc_id, call_id, rdata):
-    """Callback для входящих звонков"""
-    global current_call
-    
-    call_info = pj.call_get_info(call_id)
-    logging.info(f"Incoming call from {call_info.remote_info}")
-    
-    current_call = call_id
-    
-    # Автоматически отвечаем
-    pj.call_answer(call_id, 200)
-
-
-def main(domain, user, password):
-    global player_id, recorder_id
-    
-    # Инициализация библиотеки
-    lib = pj.Lib()
-    
-    try:
-        # Создаем endpoint
-        lib.init(log_cfg=pj.LogConfig(level=4, callback=None))
-        
-        # Создаем UDP транспорт
-        transport = lib.create_transport(pj.TransportType.UDP, 
-                                        pj.TransportConfig(5060))
-        logging.info(f"SIP transport started on {transport.info().host}:{transport.info().port}")
-        
-        # Запускаем pjsua
-        lib.start()
-        logging.info("PJSUA started")
-        
-        # Создаем аккаунт
-        acc_cfg = pj.AccountConfig(
-            domain=domain,
-            username=user,
-            password=password
-        )
-        
-        acc = lib.create_account(acc_cfg, set_default=True, cb=pj.AccountCallback(
-            on_incoming_call=on_incoming_call
-        ))
-        
-        logging.info(f"Account created: {acc.info().uri}")
-        
-        # Ждем регистрации
-        time.sleep(2)
-        acc_info = acc.info()
-        if acc_info.reg_status == 200:
-            logging.info(f"Registration successful: {acc_info.reg_status} {acc_info.reg_reason}")
-        else:
-            logging.warning(f"Registration status: {acc_info.reg_status} {acc_info.reg_reason}")
-        
-        # Основной цикл
-        logging.info("Waiting for incoming calls... Press Ctrl+C to exit")
-        
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            logging.info("\nShutting down...")
-        
-    except pj.Error as e:
-        logging.error(f"PJSUA error: {e}")
-    
-    finally:
-        # Cleanup
-        if current_call:
-            try:
-                pj.call_hangup(current_call)
-            except:
-                pass
-        
-        if player_id:
-            try:
-                pj.player_destroy(player_id)
-                logging.info("Player destroyed")
-            except:
-                pass
-        
-        if recorder_id:
-            try:
-                pj.recorder_destroy(recorder_id)
-                logging.info("Recorder destroyed")
-            except:
-                pass
-        
-        lib.destroy()
-        logging.info("PJSUA destroyed")
+        self.ep.libDestroy()
+        logging.info("Destroyed")
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 4:
-        print(f"Usage: {sys.argv[0]} <domain> <user> <password>")
+        print(f"Usage: {sys.argv[0]} <domain> <user> <password> [sip:target@domain]")
+        sys.exit(1)
+
+    domain, user, passwd = sys.argv[1:4]
+    
+    # Check file existence
+    import os
+    if not os.path.exists("output.wav"):
+        logging.error("ERROR: output.wav not found!")
         sys.exit(1)
     
-    domain, user, password = sys.argv[1:4]
-    main(domain, user, password)
+    logging.info(f"Found output.wav ({os.path.getsize('output.wav')} bytes)")
+    logging.info("Audio will be auto-converted to PJSUA2 format if needed")
+    
+    bot = VoIPBot(domain, user, passwd)
+
+    if len(sys.argv) > 4:
+        target = sys.argv[4]
+        bot.make_call(target)
+
+    logging.info("Ready. Waiting for calls...")
+    
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logging.info("\nShutting down...")
+        bot.destroy()
