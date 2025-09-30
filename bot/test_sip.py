@@ -7,7 +7,7 @@ from rtp_streamer import RtpStreamerMediaPort
 from wav_converter import ensure_pjsua_compatible
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="[%(asctime)s] %(levelname)-8s %(message)s",
     datefmt="%H:%M:%S"
 )
@@ -38,7 +38,6 @@ class MyCall(pj.Call):
         super().__init__(acc, call_id)
         self.rtp_port = None
         self.ep = ep
-        self.recorder = None  # Fallback recorder, if needed
         self.wav_file = wav_file
 
     def onCallState(self, prm):
@@ -46,9 +45,13 @@ class MyCall(pj.Call):
         logging.info(f"Call state: {ci.stateText}")
         if ci.state == pj.PJSIP_INV_STATE_DISCONNECTED:
             logging.info("Call disconnected")
-            # Save recording on disconnect
             if self.rtp_port:
-                self.rtp_port.save_to_wav("captured_audio.wav")
+                try:
+                    self.rtp_port.save_to_wav("captured_audio.wav")
+                    logging.info("Recording saved")
+                except Exception as e:
+                    logging.error(f"Error saving recording: {e}")
+                self.rtp_port = None
 
     def onCallMediaState(self, prm):
         logging.info("Entering onCallMediaState")
@@ -59,56 +62,58 @@ class MyCall(pj.Call):
                 logging.info("Audio active, setting up media")
                 
                 try:
-                    # Get call's audio media (port ID should be 1)
                     audio_media = self.getAudioMedia(mi.index)
                     logging.info(f"Got audio media, port ID: {audio_media.getPortId()}")
                     
-                    # Convert WAV to PJSUA2-compatible format (PCM16, mono, 8000Hz)
+                    # Convert WAV to PCM16/mono/8000Hz
                     compatible_file = ensure_pjsua_compatible(self.wav_file, target_rate=8000)
                     logging.info(f"Using audio file: {compatible_file}")
                     
-                    # Use custom port for both playback and recording
-                    self.rtp_port = RtpStreamerMediaPort(compatible_file)
-                    logging.info("RTP port created")
+                    # Create player and recorder
+                    self.rtp_port = RtpStreamerMediaPort(compatible_file, clock_rate=8000)
+                    self.rtp_port.createPlayer()
+                    self.rtp_port.createRecorder("captured_audio.wav")
+                    logging.info("Player and recorder created")
                     
-                    # KEY FIX: Register the custom port to the conference bridge
-                    self.rtp_port.createPort("rtp_streamer")
-                    logging.info(f"Custom port registered with ID: {self.rtp_port.getPortId()}")
-                    
-                    # Connect bidirectional:
-                    # - Custom port transmits to call (playback)
+                    # Connect for playback
+                    logging.info(f"Connecting player to audio media {audio_media.getPortId()}")
                     self.rtp_port.startTransmit(audio_media)
-                    logging.info("✓ Playback enabled via RTP port")
+                    logging.info("✓ Playback enabled")
                     
-                    # - Call transmits to custom port (recording)
-                    audio_media.startTransmit(self.rtp_port)
-                    logging.info("✓ Recording enabled via RTP port")                    
+                    # Connect for recording
+                    logging.info(f"Connecting audio media {audio_media.getPortId()} to recorder")
+                    self.rtp_port.receiveFrom(audio_media)
+                    logging.info("✓ Recording enabled")
+                    
                 except Exception as e:
                     logging.error(f"Error in onCallMediaState: {e}")
                     import traceback
                     traceback.print_exc()
-                    
-                    # Fallback: Use built-in recorder if custom fails
                     try:
-                        self.recorder = pj.AudioMediaRecorder()
-                        self.recorder.createRecorder("captured_audio.wav")
-                        audio_media.startTransmit(self.recorder)
-                        logging.info("✓ Fallback recording enabled via AudioMediaRecorder")
+                        self.rtp_port = None
+                        recorder = pj.AudioMediaRecorder()
+                        recorder.createRecorder("captured_audio.wav")
+                        audio_media.startTransmit(recorder)
+                        logging.info("✓ Fallback recording enabled")
                     except Exception as fallback_e:
                         logging.error(f"Failed fallback recorder: {fallback_e}")
 
 
 class VoIPBot:
-    def __init__(self, sip_domain, sip_user, sip_pass, local_ip="192,168.1.181"):
+    def __init__(self, sip_domain, sip_user, sip_pass, local_ip="192.168.1.181"):
         self.ep = pj.Endpoint()
         self.ep.libCreate()
 
         ep_cfg = pj.EpConfig()
         ep_cfg.uaConfig.threadCnt = 1
-        ep_cfg.logConfig.level = 4  # Reduced logging
+        ep_cfg.uaConfig.maxCalls = 4
+        ep_cfg.logConfig.level = 5
+        ep_cfg.medConfig.sndClockRate = 8000
+        ep_cfg.medConfig.channelCount = 1
+        ep_cfg.medConfig.audioFramePtime = 20
+        ep_cfg.medConfig.noVad = True
         self.ep.libInit(ep_cfg)
         
-        # KEY FIX: Use null sound device for headless/server-side operation
         self.ep.audDevManager().setNullDev()
         logging.info("Null sound device set (no hardware audio needed)")
 
@@ -116,7 +121,14 @@ class VoIPBot:
         tcfg = pj.TransportConfig()
         tcfg.port = 5060
         tcfg.boundAddr = local_ip
+        tcfg.publicAddr = local_ip
         self.ep.transportCreate(pj.PJSIP_TRANSPORT_UDP, tcfg)
+
+        # Codec settings
+        self.ep.codecSetPriority("*", 0)  # Disable all codecs
+        self.ep.codecSetPriority("PCMA/8000/1", 255)  # Primary: PCMA
+        self.ep.codecSetPriority("PCMU/8000/1", 254)  # Fallback: PCMU
+        logging.info("Codecs set to PCMA/8000/1 (255), PCMU/8000/1 (254)")
 
         self.ep.libStart()
         logging.info("PJSUA2 started")
@@ -125,9 +137,7 @@ class VoIPBot:
         acc_cfg = pj.AccountConfig()
         acc_cfg.idUri = f"sip:{sip_user}@{sip_domain}"
         acc_cfg.regConfig.registrarUri = f"sip:{sip_domain}"
-        cred = pj.AuthCredInfo("digest", "*", sip_user, 0, sip_pass)
-        acc_cfg.sipConfig.authCreds.append(cred)
-
+        acc_cfg.sipConfig.authCreds.append(pj.AuthCredInfo("digest", "*", sip_user, 0, sip_pass))
         self.account = MyAccount(self.ep)
         self.account.create(acc_cfg)
 
@@ -141,31 +151,33 @@ class VoIPBot:
         logging.info("Cleaning up...")
         
         if self.account and self.account.current_call:
-            call = self.account.current_call
-            
-            # Save recording if exists
-            if call.rtp_port:
-                try:
-                    call.rtp_port.save_to_wav("captured_audio.wav")
-                    logging.info("Recording saved")
-                except Exception as e:
-                    logging.error(f"Error saving recording: {e}")
-            
-            # Clean resources
-            if call.rtp_port:
-                try:
-                    del call.rtp_port
-                except:
-                    pass
-            
-            if call.recorder:
-                try:
-                    del call.recorder
-                except:
-                    pass
+            try:
+                call = self.account.current_call
+                if call.isActive():
+                    call.hangup(pj.CallOpParam())
+                if call.rtp_port:
+                    try:
+                        call.rtp_port.save_to_wav("captured_audio.wav")
+                        logging.info("Recording saved")
+                    except Exception as e:
+                        logging.error(f"Error saving recording: {e}")
+                    call.rtp_port = None
+                self.account.current_call = None
+            except Exception as e:
+                logging.error(f"Error cleaning up call: {e}")
 
-        self.ep.libDestroy()
-        logging.info("Destroyed")
+        try:
+            if self.account:
+                self.account.delete()
+                self.account = None
+        except Exception as e:
+            logging.error(f"Error deleting account: {e}")
+
+        try:
+            self.ep.libDestroy()
+            logging.info("Destroyed")
+        except Exception as e:
+            logging.error(f"Error destroying endpoint: {e}")
 
 
 if __name__ == "__main__":
@@ -175,7 +187,6 @@ if __name__ == "__main__":
 
     domain, user, passwd = sys.argv[1:4]
     
-    # Check file existence
     import os
     if not os.path.exists("output.wav"):
         logging.error("ERROR: output.wav not found!")
