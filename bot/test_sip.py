@@ -3,6 +3,8 @@ import sys
 import time
 import logging
 import pjsua2 as pj
+import threading
+import queue
 from rtp_streamer import RtpStreamerMediaPort
 from wav_converter import ensure_pjsua_compatible
 
@@ -24,7 +26,7 @@ class MyAccount(pj.Account):
         logging.info(f"Account registration: {info.regIsActive} ({prm.code} {prm.reason})")
 
     def onIncomingCall(self, prm):
-        call = MyCall(self, prm.callId, self.ep, wav_file="output.wav")
+        call = MyCall(self, prm.callId, self.ep, wav_file="output_phone.wav")
         self.current_call = call
         ci = call.getInfo()
         logging.info(f"Incoming call from {ci.remoteUri}")
@@ -34,11 +36,13 @@ class MyAccount(pj.Account):
 
 
 class MyCall(pj.Call):
-    def __init__(self, acc, call_id=pj.PJSUA_INVALID_ID, ep=None, wav_file="output.wav"):
+    def __init__(self, acc, call_id=pj.PJSUA_INVALID_ID, ep=None, wav_file="output_phone.wav"):
         super().__init__(acc, call_id)
         self.rtp_port = None
         self.ep = ep
         self.wav_file = wav_file
+        self.timer = None
+        self.hangup_queue = queue.Queue()  # Queue for hangup commands
 
     def onCallState(self, prm):
         ci = self.getInfo()
@@ -52,6 +56,9 @@ class MyCall(pj.Call):
                 except Exception as e:
                     logging.error(f"Error saving recording: {e}")
                 self.rtp_port = None
+            if self.timer:
+                self.timer.cancel()
+                self.timer = None
 
     def onCallMediaState(self, prm):
         logging.info("Entering onCallMediaState")
@@ -85,6 +92,10 @@ class MyCall(pj.Call):
                     self.rtp_port.receiveFrom(audio_media)
                     logging.info("✓ Recording enabled")
                     
+                    # Start timer to check playback completion
+                    self.timer = threading.Timer(0.5, self.check_playback_done)
+                    self.timer.start()
+                    
                 except Exception as e:
                     logging.error(f"Error in onCallMediaState: {e}")
                     import traceback
@@ -97,6 +108,21 @@ class MyCall(pj.Call):
                         logging.info("✓ Fallback recording enabled")
                     except Exception as fallback_e:
                         logging.error(f"Failed fallback recorder: {fallback_e}")
+
+    def check_playback_done(self):
+        try:
+            if self.rtp_port and self.isActive() and self.rtp_port.is_playback_done():
+                logging.info("Playback completed, queuing hangup")
+                self.hangup_queue.put(True)  # Signal hangup
+            else:
+                # Reschedule timer
+                self.timer = threading.Timer(0.5, self.check_playback_done)
+                self.timer.start()
+        except Exception as e:
+            logging.error(f"Error in check_playback_done: {e}")
+            if self.timer:
+                self.timer.cancel()
+                self.timer = None
 
 
 class VoIPBot:
@@ -188,11 +214,11 @@ if __name__ == "__main__":
     domain, user, passwd = sys.argv[1:4]
     
     import os
-    if not os.path.exists("output.wav"):
-        logging.error("ERROR: output.wav not found!")
+    if not os.path.exists("output_phone.wav"):
+        logging.error("ERROR: output_phone.wav not found!")
         sys.exit(1)
     
-    logging.info(f"Found output.wav ({os.path.getsize('output.wav')} bytes)")
+    logging.info(f"Found output_phone.wav ({os.path.getsize('output_phone.wav')} bytes)")
     logging.info("Audio will be auto-converted to PJSUA2 format if needed")
     
     bot = VoIPBot(domain, user, passwd)
@@ -205,7 +231,20 @@ if __name__ == "__main__":
     
     try:
         while True:
-            time.sleep(1)
+            time.sleep(0.1)  # Reduced sleep for faster queue processing
+            # Process hangup queue for current call
+            if bot.account and bot.account.current_call:
+                call = bot.account.current_call
+                try:
+                    if not call.hangup_queue.empty():
+                        call.hangup_queue.get_nowait()  # Consume signal
+                        if call.isActive():
+                            logging.info("Processing queued hangup")
+                            prm = pj.CallOpParam()
+                            prm.statusCode = pj.PJSIP_SC_OK
+                            call.hangup(prm)
+                except Exception as e:
+                    logging.error(f"Error processing hangup queue: {e}")
     except KeyboardInterrupt:
         logging.info("\nShutting down...")
         bot.destroy()

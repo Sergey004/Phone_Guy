@@ -4,8 +4,6 @@ import httpx
 import ffmpeg
 import rich.logging
 
-from Sippy.SIP import SIPClient
-
 logging.basicConfig(
     level="INFO",
     format="%(message)s",

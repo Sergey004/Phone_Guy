@@ -11,7 +11,6 @@ from openai import OpenAI
 from dotenv import load_dotenv
 import os
 
-import shared_state
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from .ai_config import DEFAULT_PROMPT

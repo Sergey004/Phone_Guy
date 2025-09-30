@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import sys
 import argparse
 import time
@@ -5,6 +6,15 @@ import logging
 import wave
 import pjsua2 as pj
 import rich.logging
+import threading
+import queue
+import json
+import os
+from rtp_streamer import RtpStreamerMediaPort
+from Adapters.stt_adapter import STTAdapter
+from Adapters.tts_adapter import TTSAdapter
+from Adapters.llm_adapter import phoneguy_reply
+from wav_converter import ensure_pjsua_compatible
 
 # Configure logging with rich
 logging.basicConfig(
@@ -13,15 +23,29 @@ logging.basicConfig(
     handlers=[rich.logging.RichHandler(rich_tracebacks=True)]
 )
 
-# Assuming RtpStreamerMediaPort is defined in rtp_streamer.py
-from rtp_streamer import RtpStreamerMediaPort
+class SttFeederMediaPort(pj.AudioMediaPort):
+    def __init__(self, stt_adapter):
+        super().__init__()
+        self.stt_adapter = stt_adapter
+
+    def onFrameReceived(self, frame, channel):
+        logging.debug(f"Received frame: size={frame.size}")
+        self.stt_adapter.feed_pcm(bytes(frame.buf))
 
 class MyCall(pj.Call):
-    def __init__(self, acc, call_id=pj.PJSUA_INVALID_ID, audio_file=None):
-        pj.Call.__init__(self, acc, call_id)
-        self.rtp_streamer_port: RtpStreamerMediaPort = None
-        self.audio_player: pj.AudioMediaPlayer = None
+    def __init__(self, acc, call_id=pj.PJSUA_INVALID_ID, audio_file=None, stt_adapter=None, tts_adapter=None):
+        super().__init__(acc, call_id)
+        self.rtp_streamer_port = None
+        self.audio_player = None
         self.audio_file = audio_file
+        self.stt_adapter = stt_adapter
+        self.tts_adapter = tts_adapter
+        self.stt_feeder_port = None
+        self.timer = None
+        self.hangup_queue = queue.Queue()
+        self.playback_queue = queue.Queue()
+        self.recording_file = "captured_audio.wav"
+        self.tts_file = "tts_output.wav"
 
     def onCallState(self, prm):
         ci = self.getInfo()
@@ -31,37 +55,54 @@ class MyCall(pj.Call):
         elif ci.state == pj.PJSIP_INV_STATE_DISCONNECTED:
             logging.info("Call disconnected")
             if self.rtp_streamer_port:
-                self.rtp_streamer_port.save_to_wav("captured_audio.wav")
+                self.rtp_streamer_port.save_to_wav(self.recording_file)
                 self.rtp_streamer_port.destroy()
                 self.rtp_streamer_port = None
             if self.audio_player:
                 self.audio_player.destroy()
                 self.audio_player = None
+            if self.timer:
+                self.timer.cancel()
+                self.timer = None
+            # Process STT/TTS after disconnect if needed
+            self.process_stt_tts()
+
+    def process_stt_tts(self):
+        # STT is real-time, but if needed, wait for last segment
+        text = phoneguy_reply("Example text from STT")  # Replace with actual STT text from queue
+        pcm_data = self.tts_adapter.synthesize(text)
+        if pcm_data:
+            # Save PCM to temp WAV for playback
+            with wave.open(self.tts_file, 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(8000)
+                wf.writeframes(pcm_data)
+            # Queue for playback
+            self.playback_queue.put(self.tts_file)
 
     def onCallMediaState(self, prm):
         logging.info("*** onCallMediaState ***")
         ci = self.getInfo()
 
         for mi in ci.media:
-            if mi.type == pj.PJMEDIA_TYPE_AUDIO and \
-               (mi.dir == pj.PJMEDIA_DIR_RECVONLY or mi.dir == pj.PJMEDIA_DIR_SENDRECV):
-                audio_media: pj.AudioMedia = self.getMedia(mi.index)
-                media_conf: pj.ConfPortInfo = audio_media.getPortInfo()
+            if mi.type == pj.PJMEDIA_TYPE_AUDIO and (mi.dir == pj.PJMEDIA_DIR_SENDRECV or mi.dir == pj.PJMEDIA_DIR_RECVONLY):
+                audio_media = self.getMedia(mi.index)
+                media_conf = audio_media.getPortInfo()
 
                 # Create and register the custom media port for capturing incoming audio
-                self.rtp_streamer_port = RtpStreamerMediaPort()
-                self.rtp_streamer_port.createPort("rtp_streamer_port", media_conf.format)
-
-                # Connect capture device to RTP streamer (for incoming audio)
-                pj.Endpoint.instance().audDevManager().getCaptureDevMedia().startTransmit(self.rtp_streamer_port)
-                audio_media.startTransmit(self.rtp_streamer_port)
-                logging.info(f"RTP streaming to RtpStreamerMediaPort started for media index {mi.index}")
+                self.stt_feeder_port = SttFeederMediaPort(self.stt_adapter)
+                # Assuming createPort is fixed or not needed if not using custom port for other things
+                # Connect incoming audio to STT feeder
+                audio_media.startTransmit(self.stt_feeder_port)
+                logging.info(f"Incoming audio connected to STT feeder for media index {mi.index}")
 
                 # Create and connect AudioMediaPlayer for playing WAV file
                 if self.audio_file:
                     try:
                         self.audio_player = pj.AudioMediaPlayer()
-                        self.audio_player.createPlayer(self.audio_file, 0)  # 0 means auto-detect format
+                        compatible_file = ensure_pjsua_compatible(self.audio_file, target_rate=8000)
+                        self.audio_player.createPlayer(compatible_file, 0)  # 0 means auto-detect format
                         self.audio_player.startTransmit(audio_media)
                         logging.info(f"AudioMediaPlayer started for file {self.audio_file} on media index {mi.index}")
                     except pj.Error as e:
@@ -70,129 +111,133 @@ class MyCall(pj.Call):
                 else:
                     logging.warning("No audio file specified, no audio will be played.")
 
-class MyAccount(pj.Account):
-    def __init__(self, acc_cfg):
-        pj.Account.__init__(self)
-        self.acc_cfg = acc_cfg
+                # Start timer to check playback completion
+                self.timer = threading.Timer(0.5, self.check_playback_done)
+                self.timer.start()
 
-    def onRegState(self, prm):
-        logging.info(f"Registration state: {prm.reason}, code: {prm.code}")
-        if prm.code != 200:
-            logging.error(f"Registration failed: {prm.reason}")
-            raise RuntimeError(f"Failed to register SIP account: {prm.reason}")
+    def check_playback_done(self):
+        try:
+            if self.rtp_port and self.isActive() and self.rtp_port.is_playback_done():
+                logging.info("Playback completed, queuing hangup")
+                self.hangup_queue.put(True)
+            else:
+                # Reschedule timer
+                self.timer = threading.Timer(0.5, self.check_playback_done)
+                self.timer.start()
+        except Exception as e:
+            logging.error(f"Error in check_playback_done: {e}")
+            if self.timer:
+                self.timer.cancel()
+                self.timer = None
+
 
 class VoIPBot:
-    def __init__(self, sip_username, sip_password, sip_domain, sip_server, clientip=None, audio_file=None):
-        self.username = sip_username
-        self.password = sip_password
-        self.domain = sip_domain
-        self.server = sip_server
-        self.clientip = clientip
-        self.audio_file = audio_file
-
+    def __init__(self, config):
         self.ep = pj.Endpoint()
         self.ep.libCreate()
+
         ep_cfg = pj.EpConfig()
-        ep_cfg.logConfig.level = 6  # Increased log level for debugging
-        ep_cfg.medConfig.sndRecLatency = 0
-        ep_cfg.medConfig.sndPlayLatency = 0
-        ep_cfg.medConfig.clockRate = 16000
+        ep_cfg.uaConfig.threadCnt = 1
+        ep_cfg.uaConfig.maxCalls = 4
+        ep_cfg.logConfig.level = 5
+        ep_cfg.medConfig.sndClockRate = 8000
         ep_cfg.medConfig.channelCount = 1
+        ep_cfg.medConfig.audioFramePtime = 20
         ep_cfg.medConfig.noVad = True
-        ep_cfg.medConfig.ilbcWasEnabled = False
-        ep_cfg.medConfig.vidPreviewEnable = False
-        ep_cfg.medConfig.enableIce = True
-        ep_cfg.medConfig.enableTurn = True
-        ep_cfg.medConfig.enableStun = True
-        ep_cfg.uaConfig.threadCnt = 0
         self.ep.libInit(ep_cfg)
+        
+        self.ep.audDevManager().setNullDev()
+        logging.info("Null sound device set (no hardware audio needed)")
 
-        # List available audio devices for debugging
-        devices = self.ep.audDevManager().enumDev()
-        logging.info(f"Available audio devices: {devices}")
-        # Use default audio device (remove setNullDev for real audio)
-        try:
-            self.ep.audDevManager().setCaptureDev(0)
-            self.ep.audDevManager().setPlaybackDev(0)
-        except pj.Error as e:
-            logging.warning(f"Failed to set audio devices: {e}, falling back to null device")
-            self.ep.audDevManager().setNullDev()
+        sip_cfg = config["sip"]
+        local_ip = sip_cfg.get("local_addr", "192.168.1.181")
 
-        ts_cfg = pj.TransportConfig()
-        ts_cfg.port = 5060
-        if self.clientip:
-            ts_cfg.public_addr = self.clientip
-        self.ep.transportCreate(pj.PJSIP_TRANSPORT_UDP, ts_cfg)
+        # Transport
+        tcfg = pj.TransportConfig()
+        tcfg.port = sip_cfg.get("local_port", 5060)
+        tcfg.boundAddr = local_ip
+        tcfg.publicAddr = local_ip
+        self.ep.transportCreate(pj.PJSIP_TRANSPORT_UDP, tcfg)
+
+        # Codec settings
+        self.ep.codecSetPriority("*", 0)  # Disable all codecs
+        self.ep.codecSetPriority("PCMA/8000/1", 255)  # Primary: PCMA
+        self.ep.codecSetPriority("PCMU/8000/1", 254)  # Fallback: PCMU
+        logging.info("Codecs set to PCMA/8000/1 (255), PCMU/8000/1 (254)")
+
         self.ep.libStart()
+        logging.info("PJSUA2 started")
 
+        # Account
         acc_cfg = pj.AccountConfig()
-        acc_cfg.idUri = f"sip:{self.username}@{self.domain}"
-        acc_cfg.regConfig.registrarUri = f"sip:{self.server}"
-        acc_cfg.sipConfig.authCreds.append(pj.AuthCredInfo("digest", "asterisk", self.username, 0, self.password))
-        if self.clientip:
-            acc_cfg.mediaConfig.transportConfig.bound_addr = self.clientip
-        self.acc = MyAccount(acc_cfg)
-        self.acc.create(acc_cfg)
+        acc_cfg.idUri = f"sip:{sip_cfg['username']}@{sip_cfg['domain']}"
+        acc_cfg.regConfig.registrarUri = f"sip:{sip_cfg['domain']}"
+        acc_cfg.sipConfig.authCreds.append(pj.AuthCredInfo("digest", "*", sip_cfg['username'], 0, sip_cfg['password']))
+        self.account = MyAccount(self.ep)
+        self.account.create(acc_cfg)
 
-        self.current_call = None
-
-    def make_call(self, dest_uri):
-        if self.current_call:
-            logging.warning("Already in a call, disconnecting current call.")
-            self.current_call.hangup()
-            self.current_call = None
-
-        logging.info(f"Making call to {dest_uri}")
-        try:
-            self.current_call = MyCall(self.acc, audio_file=self.audio_file)
-            call_prm = pj.CallOpParam()
-            call_prm.opt.audioCount = 1
-            call_prm.opt.videoCount = 0
-            self.current_call.makeCall(dest_uri, call_prm)
-        except pj.Error as e:
-            logging.error(f"Failed to make call: {e}")
-            self.current_call = None
-            raise
-
-    def hangup_call(self):
-        if self.current_call:
-            logging.info("Hanging up current call.")
-            call_prm = pj.CallOpParam()
-            self.current_call.hangup(call_prm)
-            self.current_call = None
-        else:
-            logging.info("No active call to hangup.")
+        # STT and TTS adapters
+        self.stt_adapter = STTAdapter(config, logging.getLogger("STT"))
+        self.tts_adapter = TTSAdapter(config, logging.getLogger("TTS"))
 
     def destroy(self):
-        if self.current_call:
-            if self.current_call.rtp_streamer_port:
-                self.current_call.rtp_streamer_port.save_to_wav("captured_audio.wav")
-            self.hangup_call()
-        time.sleep(1)
-        self.ep.libDestroy()
-        logging.info("SIP client destroyed.")
+        logging.info("Cleaning up...")
+        
+        if self.account and self.account.current_call:
+            try:
+                call = self.account.current_call
+                if call.isActive():
+                    call.hangup(pj.CallOpParam())
+                if call.rtp_streamer_port:
+                    try:
+                        call.rtp_streamer_port.save_to_wav("captured_audio.wav")
+                        logging.info("Recording saved")
+                    except Exception as e:
+                        logging.error(f"Error saving recording: {e}")
+                    call.rtp_streamer_port = None
+                self.account.current_call = None
+            except Exception as e:
+                logging.error(f"Error cleaning up call: {e}")
+
+        try:
+            if self.account:
+                self.account.delete()
+                self.account = None
+        except Exception as e:
+            logging.error(f"Error deleting account: {e}")
+
+        try:
+            self.ep.libDestroy()
+            logging.info("Destroyed")
+        except Exception as e:
+            logging.error(f"Error destroying endpoint: {e}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="SIP Client with RTP Streaming and Audio File Playback")
-    parser.add_argument("-u", "--username", required=True, help="SIP Username")
-    parser.add_argument("-p", "--password", required=True, help="SIP Password")
-    parser.add_argument("-d", "--domain", required=True, help="SIP Domain")
-    parser.add_argument("-s", "--server", required=True, help="SIP Server")
-    parser.add_argument("--dest_uri", required=True, help="Destination URI for the call")
-    parser.add_argument("--clientip", help="Client's public IP address for NAT traversal")
-    parser.add_argument("--audio_file", required=True, help="Path to WAV audio file to play")
-    args = parser.parse_args()
+    # Load config
+    with open("config.json", "r") as f:
+        config = json.load(f)
 
     bot = None
     try:
-        bot = VoIPBot(args.username, args.password, args.domain, args.server, args.clientip, args.audio_file)
+        bot = VoIPBot(config)
         logging.info("SIP client initialized. Press Ctrl+C to exit.")
 
-        if args.dest_uri:
-            bot.make_call(args.dest_uri)
-
+        # Main loop for queue processing
         while True:
-            time.sleep(1)
+            time.sleep(0.1)
+            # Process hangup queue for current call
+            if bot.account and bot.account.current_call:
+                call = bot.account.current_call
+                try:
+                    if not call.hangup_queue.empty():
+                        call.hangup_queue.get_nowait()
+                        if call.isActive():
+                            logging.info("Processing queued hangup")
+                            prm = pj.CallOpParam()
+                            prm.statusCode = pj.PJSIP_SC_OK
+                            call.hangup(prm)
+                except Exception as e:
+                    logging.error(f"Error processing hangup queue: {e}")
 
     except Exception as e:
         logging.error(f"An error occurred: {e}")

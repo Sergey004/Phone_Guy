@@ -2,6 +2,8 @@ import pjsua2 as pj
 import numpy as np
 import logging
 import soundfile as sf
+import time
+import os
 
 class RtpStreamerMediaPort:
     def __init__(self, wav_file, clock_rate=8000):
@@ -12,6 +14,8 @@ class RtpStreamerMediaPort:
         self.recorded_data = []
         self.player = None
         self.recorder = None
+        self.playback_duration = 0  # Duration in seconds
+        self.playback_start_time = None  # Start time of playback
 
         logging.info(f"Initializing RtpStreamerMediaPort with WAV: {wav_file}, clock_rate={clock_rate}")
         try:
@@ -25,6 +29,8 @@ class RtpStreamerMediaPort:
                 data = data[:, 0]  # Ensure 1D array for mono
             logging.info(f"Playback data shape: {data.shape}, {clock_rate}Hz, 1 channel(s)")
             self.playback_data = data
+            self.playback_duration = len(data) / clock_rate  # Duration in seconds
+            logging.info(f"Playback duration: {self.playback_duration:.2f} seconds")
         except Exception as e:
             logging.error(f"Failed to load WAV: {e}")
             self.playback_data = None
@@ -39,6 +45,13 @@ class RtpStreamerMediaPort:
                 logging.info(f"Temporary WAV written: {temp_wav}")
                 self.player.createPlayer(temp_wav, 0)
                 logging.info(f"AudioMediaPlayer created for {temp_wav}")
+                self.playback_start_time = time.time()  # Record start time
+                # Clean up temporary WAV
+                try:
+                    os.remove(temp_wav)
+                    logging.info(f"Cleaned up temporary WAV: {temp_wav}")
+                except Exception as e:
+                    logging.error(f"Failed to clean up {temp_wav}: {e}")
             else:
                 logging.error("No playback data available for AudioMediaPlayer")
                 raise RuntimeError("No playback data")
@@ -78,3 +91,14 @@ class RtpStreamerMediaPort:
             logging.info(f"Recording handled by AudioMediaRecorder, saved to {filename}")
         else:
             logging.warning("No recorder available to save WAV")
+
+    def is_playback_done(self):
+        try:
+            if self.player and self.playback_start_time is not None:
+                elapsed_time = time.time() - self.playback_start_time
+                logging.debug(f"Playback elapsed: {elapsed_time:.2f}s, duration: {self.playback_duration:.2f}s")
+                return elapsed_time >= self.playback_duration
+            return True  # No player or no start time, consider done
+        except Exception as e:
+            logging.error(f"Error checking playback status: {e}")
+            return True  # On error, assume done to avoid hanging
