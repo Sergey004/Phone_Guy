@@ -1,1 +1,1 @@
-python voip_client\example.py --server 192.168.1.176 --username 555533 --password Test1234 --callee sip:1001@192.168.1.176 --audio-file F:\Test_Phone\Test_audio.wav --local-ip 192.168.1.181
+ python  test_sip.py  192.168.1.176 555533 Test1234 sip:2335584@192.168.1.176

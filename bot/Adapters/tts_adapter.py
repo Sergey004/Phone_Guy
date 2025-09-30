@@ -1,8 +1,11 @@
+# bot/tts_adapter.py
 import asyncio
 import logging
 import httpx
 import ffmpeg
 import rich.logging
+
+from bot.rtp_streamer import ByteStreamMediaPort
 
 logging.basicConfig(
     level="INFO",
@@ -20,7 +23,7 @@ class TTSAdapter:
         self.model = tts_cfg.get('model', '1.5B')
         self.tokenizer_path = tts_cfg.get('tokenizer_path', 'Qwen/Qwen2.5-7B')
         self.voice = tts_cfg.get('voice', 'PhoneGuy_FNAF1_01')
-        self.sample_rate = 8000  # Для RTP: 8kHz mono s16le
+        self.sample_rate = 8000
         self._speak_lock = asyncio.Lock()
 
     async def check_health(self, retries: int = 3, backoff: float = 1.0) -> bool:
@@ -33,7 +36,7 @@ class TTSAdapter:
                     self.logger.info(f"TTS server health check successful: {health_url}")
                     return True
             except httpx.HTTPStatusError as e:
-                self.logger.error(f"TTS health check failed (attempt {attempt}/{retries}): HTTP {e.response.status_code}: {e.response.text}")
+                self.logger.error(f"TTS health check failed (attempt {attempt}/{retries}): HTTP {e.response.status_code}")
             except httpx.RequestError as e:
                 self.logger.error(f"TTS health check failed (attempt {attempt}/{retries}): {e}")
                 if attempt < retries:
@@ -62,35 +65,27 @@ class TTSAdapter:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(url, json=payload, headers=headers)
                 response.raise_for_status()
-                self.logger.debug(f"TTS response: status={response.status_code}, "
-                                f"content-type={response.headers.get('content-type', 'unknown')}, "
-                                f"size={len(response.content)} bytes")
+                audio_bytes = response.content
+                if not audio_bytes:
+                    self.logger.warning("TTS server returned empty audio.")
+                    return b''
 
-            audio_bytes = response.content
-            if not audio_bytes:
-                self.logger.warning("TTS server returned empty audio.")
-                return b''
-
-            # Декодируем любой формат в PCM s16le 8kHz mono через FFmpeg
+            # Convert to PCM s16le, 8kHz, mono
             self.logger.debug("Decoding audio to PCM s16le 8kHz mono via FFmpeg.")
             try:
                 process = (
                     ffmpeg
-                    .input('pipe:', format=None)  # Auto-detect MP3/WAV/OGG
+                    .input('pipe:', format=None)
                     .output('pipe:', format='s16le', acodec='pcm_s16le', ar=8000, ac=1)
                     .run_async(pipe_stdin=True, pipe_stdout=True, pipe_stderr=True, quiet=True)
                 )
-                pcm_data, stderr = process.communicate(input=audio_bytes)
-                process.stdin.close()
-                process.wait()
-
+                pcm_data, stderr = await asyncio.get_event_loop().run_in_executor(None, process.communicate, audio_bytes)
                 if pcm_data:
                     self.logger.info(f"Decoded PCM: {len(pcm_data)} bytes (~{len(pcm_data)/(8000*2):.1f}s)")
                     return pcm_data
                 else:
                     self.logger.warning("FFmpeg returned empty PCM output.")
                     return b''
-
             except ffmpeg.Error as e:
                 err_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
                 self.logger.error(f"FFmpeg decode error: {err_msg}")
@@ -98,7 +93,6 @@ class TTSAdapter:
             except Exception as e:
                 self.logger.error(f"Unexpected decode error: {e}", exc_info=True)
                 return b''
-
         except httpx.HTTPStatusError as e:
             self.logger.error(f"TTS HTTP error {e.response.status_code}: {e.response.text}")
             return b''
@@ -106,7 +100,7 @@ class TTSAdapter:
             self.logger.error(f"TTS synthesize failed: {e}", exc_info=True)
             return b''
 
-    async def speak(self, text: str, client: SIPClient):
+    async def speak(self, text: str, media_port: 'ByteStreamMediaPort'):
         async with self._speak_lock:
             self.logger.info(f"Speaking: '{text[:50]}...'")
             try:
@@ -114,29 +108,9 @@ class TTSAdapter:
                 if not pcm_data:
                     self.logger.warning("No PCM data from synthesize — sending silence.")
                     return
-
-                await client.start_streaming_input()
-                self.logger.debug(f"Started streaming input, PCM size: {len(pcm_data)} bytes")
-
-                frame_size = 320  # 20ms: 160 samples * 2 bytes (s16le)
-                offset = 0
-                while offset < len(pcm_data):
-                    frame = pcm_data[offset:offset + frame_size]
-                    if len(frame) < frame_size:
-                        frame += b'\x00' * (frame_size - len(frame))
-                    client.push_stream_pcm(frame, sample_rate=8000, sample_width=2, channels=1)
-                    offset += frame_size
-                    await asyncio.sleep(0.02)
-
-                await client.end_streaming_input()
-                finished = await client.wait_stream_finished(timeout=10.0)
-                if finished:
-                    self.logger.info("TTS speak completed successfully.")
-                else:
-                    self.logger.warning("TTS stream timeout — possible buffer underrun.")
+                
+                # Update media port with new PCM data
+                media_port.update_playback_data(pcm_data)
+                self.logger.info("TTS PCM data updated in media port.")
             except Exception as e:
                 self.logger.error(f"TTS speak error: {e}", exc_info=True)
-                try:
-                    await client.end_streaming_input()
-                except:
-                    pass

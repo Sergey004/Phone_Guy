@@ -4,7 +4,6 @@ import logging
 import soundfile as sf
 import time
 import os
-import queue
 
 class RtpStreamerMediaPort:
     def __init__(self, wav_file, clock_rate=8000):
@@ -103,82 +102,3 @@ class RtpStreamerMediaPort:
         except Exception as e:
             logging.error(f"Error checking playback status: {e}")
             return True  # On error, assume done to avoid hanging
-        
-
-class ByteStreamMediaPort(pj.AudioMediaPort):
-    def __init__(self, pcm_bytes: bytes = None, sample_rate=8000, channels=1, bits_per_sample=16):
-        super().__init__()
-        self.sample_rate = sample_rate
-        self.channels = channels
-        self.bits_per_sample = bits_per_sample
-        self.frame_time_ms = 20  # 20ms frames for PJSUA2
-        self.samples_per_frame = int((sample_rate * self.frame_time_ms) / 1000 * channels)
-        self.bytes_per_frame = self.samples_per_frame * (bits_per_sample // 8)
-        
-        # Playback data
-        self.playback_data = np.frombuffer(pcm_bytes, dtype=np.int16) if pcm_bytes else np.array([], dtype=np.int16)
-        self.position = 0
-        self.playback_done = False
-        self.playback_start_time = None
-        self.playback_duration = len(self.playback_data) / (sample_rate * channels) if pcm_bytes else 0
-        
-        # Recording data
-        self.recorded_bytes = bytearray()
-        self.record_queue = queue.Queue()  # For real-time STT feeding
-        
-        logging.info(f"Initialized ByteStreamMediaPort: {len(pcm_bytes or [])} bytes, {sample_rate}Hz, {channels}ch")
-
-    def putFrame(self, frame):
-        """Handle incoming audio frames for recording (STT)."""
-        if frame.buf:
-            self.recorded_bytes.extend(frame.buf)
-            self.record_queue.put(bytes(frame.buf))  # Push to STT in real-time
-        return 0
-
-    def getFrame(self, frame):
-        """Provide audio frames for playback (TTS)."""
-        if self.playback_done or self.position >= len(self.playback_data):
-            self.playback_done = True
-            frame.buf = bytearray(self.bytes_per_frame)  # Silence
-            return 0
-        
-        if self.playback_start_time is None:
-            self.playback_start_time = time.time()
-        
-        end = min(self.position + self.samples_per_frame, len(self.playback_data))
-        chunk = self.playback_data[self.position:end]
-        if len(chunk) < self.samples_per_frame:
-            padded = np.zeros(self.samples_per_frame, dtype=np.int16)
-            padded[:len(chunk)] = chunk
-            chunk = padded
-        
-        frame.buf = chunk.tobytes()
-        self.position += self.samples_per_frame
-        return 0
-
-    def update_playback_data(self, pcm_bytes: bytes):
-        """Update playback data with new PCM bytes (e.g., from TTS)."""
-        self.playback_data = np.frombuffer(pcm_bytes, dtype=np.int16)
-        self.position = 0
-        self.playback_done = False
-        self.playback_start_time = None
-        self.playback_duration = len(self.playback_data) / (self.sample_rate * self.channels)
-        logging.info(f"Updated playback data: {len(pcm_bytes)} bytes, {self.playback_duration:.2f}s")
-
-    def get_recorded_bytes(self) -> bytes:
-        """Return recorded PCM bytes."""
-        return bytes(self.recorded_bytes)
-
-    def get_next_record_chunk(self, timeout=1.0) -> bytes:
-        """Get next recorded chunk for real-time STT."""
-        try:
-            return self.record_queue.get(timeout=timeout)
-        except queue.Empty:
-            return b''
-
-    def is_playback_done(self):
-        """Check if playback is complete."""
-        if self.playback_start_time is None:
-            return False
-        elapsed = time.time() - self.playback_start_time
-        return self.playback_done or elapsed >= self.playback_duration or self.position >= len(self.playback_data)

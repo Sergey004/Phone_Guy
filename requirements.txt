@@ -9,3 +9,4 @@ chromadb
 langchain-community
 langchain-nvidia-ai-endpoints
 scipy
+nvidia-riva-client

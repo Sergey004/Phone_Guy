@@ -2,9 +2,10 @@ import logging
 import rich.logging
 from dotenv import load_dotenv
 import os
+import re
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from .ai_config import DEFAULT_PROMPT
+from ai_config import DEFAULT_PROMPT
 
 logging.basicConfig(
     level="INFO",
@@ -25,9 +26,12 @@ if NVIDIA_API_KEY:
         llm = ChatNVIDIA(
             api_key=NVIDIA_API_KEY,
             base_url=NVIDIA_API_BASE if NVIDIA_API_BASE else None,
-            model=os.getenv("NVIDIA_MODEL", "mistralai/mixtral-8x22b-instruct-v0.1")
+            model=os.getenv("NVIDIA_MODEL", "deepseek-ai/deepseek-r1"),
+            temperature=0.6,
+            top_p=0.7,
+            max_tokens=4096
         )
-        logger.info("NVIDIA API configured.")
+        logger.info("NVIDIA API configured with model: deepseek-ai/deepseek-r1")
         AI_ENABLED = True
     except Exception as e:
         logger.error(f"Error initializing NVIDIA API: {e}", exc_info=True)
@@ -50,7 +54,7 @@ def phoneguy_reply(user_text: str, ignore_system_instructions: bool = False) -> 
         ignore_system_instructions: If True, skip system instructions in the response.
     
     Returns:
-        The LLM-generated response text or an error message if AI is disabled.
+        The LLM-generated response text or a default response if AI fails or returns empty.
     """
     if not AI_ENABLED:
         logger.warning("AI is disabled. Returning default response.")
@@ -65,9 +69,19 @@ def phoneguy_reply(user_text: str, ignore_system_instructions: bool = False) -> 
         conversation_history.append(HumanMessage(content=user_text))
 
         # Generate response
+        logger.debug(f"Sending LLM request with prompt: {user_text}")
         response = llm.invoke(conversation_history)
-        ai_response_text = response.content.strip()
-        logger.info(f"LLM response: {ai_response_text}")
+        ai_response_text = response.content.strip() if response.content else ""
+        # Clean up asterisks and formatting
+        ai_response_text = re.sub(r'\*+[^\*]+\*+', '', ai_response_text).strip()
+        ai_response_text = re.sub(r'\s+', ' ', ai_response_text)  # Normalize whitespace
+        logger.info(f"Raw LLM response: {response.content}")
+        logger.info(f"Processed LLM response: {ai_response_text}")
+
+        # Check for empty response
+        if not ai_response_text:
+            logger.error("LLM returned empty response, using default")
+            ai_response_text = "Uh, hello, hello? This is Phone Guy. Something’s not right, so, uh, let’s try again, okay?"
 
         # Add AI response to history
         conversation_history.append(AIMessage(content=ai_response_text))
