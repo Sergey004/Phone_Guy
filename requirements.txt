@@ -8,3 +8,4 @@ pypdf
 chromadb
 langchain-community
 langchain-nvidia-ai-endpoints
+scipy
