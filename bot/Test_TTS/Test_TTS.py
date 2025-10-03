@@ -8,6 +8,7 @@ import queue
 import asyncio
 import soundfile as sf
 import os
+import json
 from rtp_streamer import ByteStreamMediaPort
 from stt_adapter import STTAdapter
 from tts_adapter import TTSAdapter
@@ -72,14 +73,14 @@ class MyCall(pj.Call):
         self.text_queue = queue.Queue()
         self.stt_adapter = stt_adapter
         self.tts_adapter = tts_adapter
+        self.media_ready = asyncio.Event()
 
     def onCallState(self, prm):
         ci = self.getInfo()
         logging.info(f"Call state: {ci.stateText}")
         if ci.state == pj.PJSIP_INV_STATE_CONFIRMED:
-            logging.info("Call is confirmed. Starting initial greeting and STT/TTS processing.")
-            asyncio.run_coroutine_threadsafe(self.send_initial_greeting(), self.loop)
-            asyncio.run_coroutine_threadsafe(self.process_stt_tts_loop(), self.loop)
+            logging.info("Call is confirmed. Waiting for media setup and starting STT/TTS processing.")
+            asyncio.run_coroutine_threadsafe(self.wait_for_media_and_start(), self.loop)
             asyncio.run_coroutine_threadsafe(self.log_media_stats(), self.loop)
         elif ci.state == pj.PJSIP_INV_STATE_DISCONNECTED:
             logging.info("Call disconnected")
@@ -99,6 +100,30 @@ class MyCall(pj.Call):
             if self.timer:
                 self.timer.cancel()
                 self.timer = None
+
+    async def wait_for_media_and_start(self):
+        """Wait for media setup and start greeting and STT/TTS loop."""
+        try:
+            # Retry media setup if not ready
+            for attempt in range(3):
+                logging.debug(f"Waiting for media setup (attempt {attempt+1}/3)")
+                try:
+                    await asyncio.wait_for(self.media_ready.wait(), timeout=10.0)
+                    logging.info("Media setup complete, starting initial greeting")
+                    await self.send_initial_greeting()
+                    await self.process_stt_tts_loop()
+                    return
+                except asyncio.TimeoutError:
+                    logging.warning(f"Media setup timeout on attempt {attempt+1}/3")
+                    # Force media state check
+                    try:
+                        self.onCallMediaState(None)
+                    except Exception as e:
+                        logging.error(f"Error forcing media state check: {e}")
+            logging.error("Media setup failed after all attempts, proceeding without greeting")
+            self.text_queue.put_nowait("Hello, welcome to the call!")
+        except Exception as e:
+            logging.error(f"Error in wait_for_media_and_start: {e}")
 
     async def send_initial_greeting(self):
         """Generate and play a Phone Guy-style greeting when the call is answered."""
@@ -163,53 +188,69 @@ class MyCall(pj.Call):
                 ci = self.getInfo()
                 for mi in ci.media:
                     if mi.type == pj.PJMEDIA_TYPE_AUDIO:
-                        logging.debug(f"Call media: index={mi.index}, status={mi.status}")
+                        logging.debug(f"Call media: index={mi.index}, status={mi.status}, port={mi.port}, direction={mi.direction}")
             except Exception as e:
                 logging.error(f"Error logging media port status: {e}")
             await asyncio.sleep(2.0)
 
     def onCallMediaState(self, prm):
         logging.info("Entering onCallMediaState")
-        ci = self.getInfo()
-        
-        for mi in ci.media:
-            if mi.type == pj.PJMEDIA_TYPE_AUDIO and mi.status == pj.PJSUA_CALL_MEDIA_ACTIVE:
-                logging.info("Audio active, setting up media")
-                try:
-                    audio_media = self.getAudioMedia(mi.index)
-                    audio_port_id = audio_media.getPortId()
-                    logging.info(f"Got audio media, port ID: {audio_port_id}")
-                    
-                    # Initialize and register ByteStreamMediaPort
-                    self.media_port = ByteStreamMediaPort(pcm_bytes=b'', sample_rate=8000)
-                    self.media_port.register_with_conf(self.ep)
-                    if self.media_port.conf_port_id < 0:
-                        raise Exception("Failed to register ByteStreamMediaPort with conference bridge")
-                    
-                    # Initialize and register SttFeederMediaPort
-                    self.stt_feeder_port = SttFeederMediaPort(self.stt_adapter)
-                    self.stt_feeder_port.register_with_conf(self.ep)
-                    if self.stt_feeder_port.conf_port_id < 0:
-                        raise Exception("Failed to register SttFeederMediaPort with conference bridge")
-                    
-                    # Connect ports using conference bridge
-                    # Playback: media_port -> audio_media
-                    pj.Endpoint.instance().conf_connect(self.media_port.conf_port_id, audio_port_id)
-                    # Recording: audio_media -> stt_feeder_port
-                    pj.Endpoint.instance().conf_connect(audio_port_id, self.stt_feeder_port.conf_port_id)
-                    
-                    logging.info(f"Connected media_port ({self.media_port.conf_port_id}) -> audio_media ({audio_port_id})")
-                    logging.info(f"Connected audio_media ({audio_port_id}) -> stt_feeder_port ({self.stt_feeder_port.conf_port_id})")
-                    
-                    # Log PJSUA2 media state
-                    logging.debug(f"Call media state: index={mi.index}, status={mi.status}")
-                    
-                    self.timer = threading.Timer(0.5, self.check_playback_done)
-                    self.timer.start()
-                except Exception as e:
-                    logging.error(f"Error in onCallMediaState: {e}")
-                    import traceback
-                    traceback.print_exc()
+        try:
+            ci = self.getInfo()
+            logging.debug(f"Call info: state={ci.stateText}, media count={len(ci.media)}")
+            
+            for mi in ci.media:
+                logging.debug(f"Media index={mi.index}, type={mi.type}, status={mi.status}, port={mi.port}, direction={mi.direction}")
+                if mi.type == pj.PJMEDIA_TYPE_AUDIO and mi.status == pj.PJSUA_CALL_MEDIA_ACTIVE:
+                    logging.info("Audio active, setting up media")
+                    try:
+                        audio_media = self.getAudioMedia(mi.index)
+                        audio_port_id = audio_media.getPortId()
+                        logging.info(f"Got audio media, port ID: {audio_port_id}")
+                        
+                        # Log media transport info for debugging
+                        try:
+                            media_transport_info = audio_media.getTransportInfo()
+                            logging.debug(f"Media transport: {media_transport_info}")
+                        except Exception as e:
+                            logging.warning(f"Could not get media transport info: {e}")
+                        
+                        # Initialize and register ByteStreamMediaPort
+                        self.media_port = ByteStreamMediaPort(pcm_bytes=b'', sample_rate=8000)
+                        self.media_port.register_with_conf(self.ep)
+                        if self.media_port.conf_port_id < 0:
+                            raise Exception("Failed to register ByteStreamMediaPort with conference bridge")
+                        
+                        # Initialize and register SttFeederMediaPort
+                        self.stt_feeder_port = SttFeederMediaPort(self.stt_adapter)
+                        self.stt_feeder_port.register_with_conf(self.ep)
+                        if self.stt_feeder_port.conf_port_id < 0:
+                            raise Exception("Failed to register SttFeederMediaPort with conference bridge")
+                        
+                        # Connect ports using conference bridge
+                        # Playback: media_port -> audio_media
+                        pj.Endpoint.instance().conf_connect(self.media_port.conf_port_id, audio_port_id)
+                        # Recording: audio_media -> stt_feeder_port
+                        pj.Endpoint.instance().conf_connect(audio_port_id, self.stt_feeder_port.conf_port_id)
+                        
+                        logging.info(f"Connected media_port ({self.media_port.conf_port_id}) -> audio_media ({audio_port_id})")
+                        logging.info(f"Connected audio_media ({audio_port_id}) -> stt_feeder_port ({self.stt_feeder_port.conf_port_id})")
+                        
+                        # Log media state
+                        logging.debug(f"Call media state: index={mi.index}, status={mi.status}")
+                        
+                        self.timer = threading.Timer(0.5, self.check_playback_done)
+                        self.timer.start()
+                        
+                        # Signal media setup complete
+                        self.media_ready.set()
+                    except Exception as e:
+                        logging.error(f"Error setting up media: {e}", exc_info=True)
+                        raise
+                else:
+                    logging.warning(f"Media not active: index={mi.index}, status={mi.status}")
+        except Exception as e:
+            logging.error(f"Error in onCallMediaState: {e}", exc_info=True)
 
     def check_playback_done(self):
         try:
@@ -229,6 +270,10 @@ class VoIPBot:
         self.ep = pj.Endpoint()
         self.ep.libCreate()
 
+        # Load config
+        with open("config.json", "r") as f:
+            config = json.load(f)
+
         ep_cfg = pj.EpConfig()
         ep_cfg.uaConfig.threadCnt = 1
         ep_cfg.uaConfig.maxCalls = 4
@@ -237,30 +282,33 @@ class VoIPBot:
         ep_cfg.medConfig.channelCount = 1
         ep_cfg.medConfig.audioFramePtime = 20
         ep_cfg.medConfig.noVad = True
+        # Set RTP port range to include config.rtp.local_port
+        ep_cfg.medConfig.rtpPortMin = config["rtp"]["local_port"]
+        ep_cfg.medConfig.rtpPortMax = config["rtp"]["local_port"] + 100
         self.ep.libInit(ep_cfg)
         
         self.ep.audDevManager().setNullDev()
         logging.info("Null sound device set (no hardware audio needed)")
 
         tcfg = pj.TransportConfig()
-        tcfg.port = 5060
+        tcfg.port = config["sip"]["local_port"]
         tcfg.boundAddr = local_ip
         tcfg.publicAddr = local_ip
         self.ep.transportCreate(pj.PJSIP_TRANSPORT_UDP, tcfg)
 
+        # Set codec priorities from config
         self.ep.codecSetPriority("*", 0)
-        self.ep.codecSetPriority("PCMA/8000/1", 255)
-        self.ep.codecSetPriority("PCMU/8000/1", 254)
-        logging.info("Codecs set to PCMA/8000/1 (255), PCMU/8000/1 (254)")
+        codec_priorities = {"G726-32": 255, "PCMA": 254, "PCMU": 253}
+        for codec in config["rtp"]["preferred_codecs"]:
+            if codec in codec_priorities:
+                self.ep.codecSetPriority(f"{codec}/8000/1", codec_priorities[codec])
+                logging.info(f"Set codec priority: {codec}/8000/1 ({codec_priorities[codec]})")
+            else:
+                logging.warning(f"Unsupported codec in config: {codec}")
 
         self.ep.libStart()
         logging.info("PJSUA2 started")
 
-        config = {
-            "sip": {"username": sip_user, "domain": sip_domain, "password": sip_pass, "local_addr": local_ip},
-            "stt": {"energy_threshold": 500, "min_chunk_ms": 1500, "silence_end_ms": 600},
-            "tts": {"api_key": "your_super_secret_api_key", "base_url": "http://localhost:8000/v1"}
-        }
         self.stt_adapter = STTAdapter(config, logging.getLogger("STT"))
         self.tts_adapter = TTSAdapter(config, logging.getLogger("TTS"))
 

@@ -53,39 +53,26 @@ class TTSAdapter:
             "input": text,
             "voice": voice
         }
-        headers = {
-            "Content-Type": "application/json",
-            "x-api-key": self.api_key
-        }
-        url = f"{self.base_url}/audio/speech"
-        self.logger.debug(f"Sending TTS request: {payload}")
-
+        headers = {"x-api-key": self.api_key}
         for attempt in range(1, retries + 1):
             try:
                 async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.post(url, json=payload, headers=headers)
+                    self.logger.debug(f"Sending TTS request (attempt {attempt}/{retries}): {text[:50]}...")
+                    response = await client.post(f"{self.base_url}/audio/speech", json=payload, headers=headers)
                     response.raise_for_status()
-                    audio_bytes = response.content
-                    if not audio_bytes:
-                        self.logger.warning(f"TTS server returned empty audio on attempt {attempt}/{retries}")
-                        continue
+                    wav_data = response.content
+                    self.logger.debug(f"Received {len(wav_data)} bytes from TTS server")
 
                     # Convert to PCM s16le, 8kHz, mono
-                    self.logger.debug("Decoding audio to PCM s16le 8kHz mono via FFmpeg")
                     try:
                         process = (
-                            ffmpeg
-                            .input('pipe:', format=None)
-                            .output('pipe:', format='s16le', acodec='pcm_s16le', ar=8000, ac=1)
-                            .run_async(pipe_stdin=True, pipe_stdout=True, pipe_stderr=True, quiet=True)
+                            ffmpeg.input('pipe:', format='wav')
+                            .output('pipe:', format='s16le', ar=self.sample_rate, ac=1)
+                            .run_async(pipe_stdin=True, pipe_stdout=True, pipe_stderr=True)
                         )
-                        pcm_data, stderr = await asyncio.get_event_loop().run_in_executor(None, process.communicate, audio_bytes)
-                        if pcm_data:
-                            self.logger.info(f"Decoded PCM: {len(pcm_data)} bytes (~{len(pcm_data)/(8000*2):.1f}s)")
-                            return pcm_data
-                        else:
-                            self.logger.warning(f"FFmpeg returned empty PCM output on attempt {attempt}/{retries}")
-                            continue
+                        pcm_data, stderr = await asyncio.get_event_loop().run_in_executor(None, lambda: process.communicate(input=wav_data))
+                        self.logger.info(f"Decoded PCM: {len(pcm_data)} bytes (~{len(pcm_data)/(self.sample_rate*2):.1f}s)")
+                        return pcm_data
                     except ffmpeg.Error as e:
                         err_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
                         self.logger.error(f"FFmpeg decode error on attempt {attempt}/{retries}: {err_msg}")
@@ -116,12 +103,18 @@ class TTSAdapter:
         async with self._speak_lock:
             self.logger.info(f"Speaking: '{text[:50]}...'")
             try:
+                # Wait for TTS server response
                 pcm_data = await self.synthesize(text)
                 if not pcm_data:
                     self.logger.warning("No PCM data from synthesize – sending silence.")
                     return
                 
-                # Update media port with new PCM data
+                # Check if media_port is valid
+                if media_port is None:
+                    self.logger.error("Media port is None, cannot update playback data")
+                    return
+                
+                # Update media port only after successful synthesis
                 media_port.update_playback_data(pcm_data)
                 self.logger.info("TTS PCM data updated in media port.")
             except Exception as e:
