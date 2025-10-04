@@ -8,7 +8,6 @@ import queue
 import asyncio
 import soundfile as sf
 import os
-import json
 from rtp_streamer import ByteStreamMediaPort
 from stt_adapter import STTAdapter
 from tts_adapter import TTSAdapter
@@ -19,6 +18,8 @@ logging.basicConfig(
     format="[%(asctime)s] %(levelname)-8s %(message)s",
     datefmt="%H:%M:%S"
 )
+
+calls = []  # Global list to keep strong references to call objects
 
 class SttFeederMediaPort(pj.AudioMediaPort):
     def __init__(self, stt_adapter):
@@ -54,6 +55,7 @@ class MyAccount(pj.Account):
 
     def onIncomingCall(self, prm):
         call = MyCall(self, prm.callId, self.ep, stt_adapter=self.stt_adapter, tts_adapter=self.tts_adapter, loop=self.loop)
+        calls.append(call)  # Keep strong reference to prevent GC
         self.current_call = call
         ci = call.getInfo()
         logging.info(f"Incoming call from {ci.remoteUri}")
@@ -77,11 +79,20 @@ class MyCall(pj.Call):
 
     def onCallState(self, prm):
         ci = self.getInfo()
-        logging.info(f"Call state: {ci.stateText}")
+        logging.info(f"Call state: {ci.stateText}, last status: {ci.lastStatusCode}, reason: {ci.lastReason}")
         if ci.state == pj.PJSIP_INV_STATE_CONFIRMED:
             logging.info("Call is confirmed. Waiting for media setup and starting STT/TTS processing.")
+            for mi in ci.media:
+                logging.debug(f"Media state: index={mi.index}, type={mi.type}, status={mi.status}")
+                try:
+                    media_info = self.getMediaSessionInfo(mi.index)
+                    logging.debug(f"Media session: local_addr={media_info.localAddr}, remote_addr={media_info.remoteAddr}, codec={media_info.codecName}, direction={media_info.direction}")
+                except Exception as e:
+                    logging.debug(f"Media session info unavailable: {e}")
             asyncio.run_coroutine_threadsafe(self.wait_for_media_and_start(), self.loop)
             asyncio.run_coroutine_threadsafe(self.log_media_stats(), self.loop)
+            # Schedule a reinvite if media not active
+            asyncio.run_coroutine_threadsafe(self.check_media_active(), self.loop)
         elif ci.state == pj.PJSIP_INV_STATE_DISCONNECTED:
             logging.info("Call disconnected")
             reset_conversation_history()
@@ -100,38 +111,43 @@ class MyCall(pj.Call):
             if self.timer:
                 self.timer.cancel()
                 self.timer = None
+            if self in calls:
+                calls.remove(self)
+
+    async def check_media_active(self):
+        """Check if media is active, reinvite if not."""
+        await asyncio.sleep(5.0)  # Wait 5 seconds for media setup
+        if not self.media_ready.is_set() and self.isActive():
+            logging.warning("Media not active after 5s, sending reinvite")
+            try:
+                prm = pj.CallOpParam()
+                prm.statusCode = 200
+                self.reinvite(prm)
+                logging.info("Reinvite sent to trigger media setup")
+            except Exception as e:
+                logging.error(f"Error sending reinvite: {e}")
 
     async def wait_for_media_and_start(self):
         """Wait for media setup and start greeting and STT/TTS loop."""
         try:
-            # Retry media setup if not ready
-            for attempt in range(3):
-                logging.debug(f"Waiting for media setup (attempt {attempt+1}/3)")
-                try:
-                    await asyncio.wait_for(self.media_ready.wait(), timeout=10.0)
-                    logging.info("Media setup complete, starting initial greeting")
-                    await self.send_initial_greeting()
-                    await self.process_stt_tts_loop()
-                    return
-                except asyncio.TimeoutError:
-                    logging.warning(f"Media setup timeout on attempt {attempt+1}/3")
-                    # Force media state check
-                    try:
-                        self.onCallMediaState(None)
-                    except Exception as e:
-                        logging.error(f"Error forcing media state check: {e}")
-            logging.error("Media setup failed after all attempts, proceeding without greeting")
+            await asyncio.wait_for(self.media_ready.wait(), timeout=20.0)
+            logging.info("Media setup complete, starting initial greeting")
+            await self.send_initial_greeting()
+            await self.process_stt_tts_loop()
+        except asyncio.TimeoutError:
+            logging.error("Media setup timeout, sending silent frame and proceeding")
+            if self.media_port:
+                silent_pcm = bytes(self.media_port.frame_size)  # 20ms of silence
+                self.media_port.update_playback_data(silent_pcm)
+                logging.info("Sent silent PCM frame to keep call alive")
             self.text_queue.put_nowait("Hello, welcome to the call!")
-        except Exception as e:
-            logging.error(f"Error in wait_for_media_and_start: {e}")
+            await self.process_stt_tts_loop()
 
     async def send_initial_greeting(self):
         """Generate and play a Phone Guy-style greeting when the call is answered."""
         try:
-            # Check TTS server health
             if not await self.tts_adapter.check_health():
                 logging.warning("TTS server unavailable, using fallback greeting")
-                # Fallback to pre-recorded WAV
                 fallback_wav = "fallback_greeting.wav"
                 if os.path.exists(fallback_wav):
                     with open(fallback_wav, "rb") as f:
@@ -167,7 +183,7 @@ class MyCall(pj.Call):
                 llm_response = phoneguy_reply(text)
                 if not llm_response or llm_response.strip() == "":
                     logging.error("LLM returned empty response, using default")
-                    llm_response = "Uh, I didn’t catch that. Could you, um, repeat it?"
+                    llm_response = "Uh, I didn't catch that. Could you, um, repeat it?"
                 logging.info(f"LLM response: {llm_response}")
                 await self.tts_adapter.speak(llm_response, self.media_port)
                 self.text_queue.put_nowait(llm_response)
@@ -179,16 +195,19 @@ class MyCall(pj.Call):
         """Periodically log media port status to debug audio flow."""
         while self.isActive():
             try:
-                # Log port IDs and connection status
                 if self.media_port and self.media_port.conf_port_id >= 0:
                     logging.debug(f"ByteStreamMediaPort active, port ID: {self.media_port.conf_port_id}")
                 if self.stt_feeder_port and self.stt_feeder_port.conf_port_id >= 0:
                     logging.debug(f"SttFeederMediaPort active, port ID: {self.stt_feeder_port.conf_port_id}")
-                # Log call media info
                 ci = self.getInfo()
                 for mi in ci.media:
                     if mi.type == pj.PJMEDIA_TYPE_AUDIO:
-                        logging.debug(f"Call media: index={mi.index}, status={mi.status}, port={mi.port}, direction={mi.direction}")
+                        logging.debug(f"Call media: index={mi.index}, status={mi.status}")
+                        try:
+                            media_info = self.getMediaSessionInfo(mi.index)
+                            logging.debug(f"Media session info: local_addr={media_info.localAddr}, remote_addr={media_info.remoteAddr}, codec={media_info.codecName}, direction={media_info.direction}")
+                        except Exception as e:
+                            logging.debug(f"Media session info unavailable: {e}")
             except Exception as e:
                 logging.error(f"Error logging media port status: {e}")
             await asyncio.sleep(2.0)
@@ -197,23 +216,16 @@ class MyCall(pj.Call):
         logging.info("Entering onCallMediaState")
         try:
             ci = self.getInfo()
-            logging.debug(f"Call info: state={ci.stateText}, media count={len(ci.media)}")
+            logging.debug(f"Call info: state={ci.stateText}, media count={len(ci.media)}, last status: {ci.lastStatusCode}, reason: {ci.lastReason}")
             
             for mi in ci.media:
-                logging.debug(f"Media index={mi.index}, type={mi.type}, status={mi.status}, port={mi.port}, direction={mi.direction}")
+                logging.debug(f"Media index={mi.index}, type={mi.type}, status={mi.status}")
                 if mi.type == pj.PJMEDIA_TYPE_AUDIO and mi.status == pj.PJSUA_CALL_MEDIA_ACTIVE:
                     logging.info("Audio active, setting up media")
                     try:
                         audio_media = self.getAudioMedia(mi.index)
                         audio_port_id = audio_media.getPortId()
                         logging.info(f"Got audio media, port ID: {audio_port_id}")
-                        
-                        # Log media transport info for debugging
-                        try:
-                            media_transport_info = audio_media.getTransportInfo()
-                            logging.debug(f"Media transport: {media_transport_info}")
-                        except Exception as e:
-                            logging.warning(f"Could not get media transport info: {e}")
                         
                         # Initialize and register ByteStreamMediaPort
                         self.media_port = ByteStreamMediaPort(pcm_bytes=b'', sample_rate=8000)
@@ -228,21 +240,21 @@ class MyCall(pj.Call):
                             raise Exception("Failed to register SttFeederMediaPort with conference bridge")
                         
                         # Connect ports using conference bridge
-                        # Playback: media_port -> audio_media
                         pj.Endpoint.instance().conf_connect(self.media_port.conf_port_id, audio_port_id)
-                        # Recording: audio_media -> stt_feeder_port
                         pj.Endpoint.instance().conf_connect(audio_port_id, self.stt_feeder_port.conf_port_id)
                         
                         logging.info(f"Connected media_port ({self.media_port.conf_port_id}) -> audio_media ({audio_port_id})")
                         logging.info(f"Connected audio_media ({audio_port_id}) -> stt_feeder_port ({self.stt_feeder_port.conf_port_id})")
                         
-                        # Log media state
-                        logging.debug(f"Call media state: index={mi.index}, status={mi.status}")
+                        try:
+                            media_info = self.getMediaSessionInfo(mi.index)
+                            logging.debug(f"Media session: local_addr={media_info.localAddr}, remote_addr={media_info.remoteAddr}, codec={media_info.codecName}, direction={media_info.direction}")
+                        except Exception as e:
+                            logging.debug(f"Media session info unavailable: {e}")
                         
                         self.timer = threading.Timer(0.5, self.check_playback_done)
                         self.timer.start()
                         
-                        # Signal media setup complete
                         self.media_ready.set()
                     except Exception as e:
                         logging.error(f"Error setting up media: {e}", exc_info=True)
@@ -270,49 +282,41 @@ class VoIPBot:
         self.ep = pj.Endpoint()
         self.ep.libCreate()
 
-        # Load config
-        with open("config.json", "r") as f:
-            config = json.load(f)
-
         ep_cfg = pj.EpConfig()
         ep_cfg.uaConfig.threadCnt = 1
         ep_cfg.uaConfig.maxCalls = 4
-        ep_cfg.logConfig.level = 6  # High verbosity for media debugging
+        ep_cfg.logConfig.level = 6
         ep_cfg.medConfig.sndClockRate = 8000
         ep_cfg.medConfig.channelCount = 1
         ep_cfg.medConfig.audioFramePtime = 20
         ep_cfg.medConfig.noVad = True
-        # Set RTP port range to include config.rtp.local_port
-        ep_cfg.medConfig.rtpPortMin = config["rtp"]["local_port"]
-        ep_cfg.medConfig.rtpPortMax = config["rtp"]["local_port"] + 100
         self.ep.libInit(ep_cfg)
         
         self.ep.audDevManager().setNullDev()
         logging.info("Null sound device set (no hardware audio needed)")
 
         tcfg = pj.TransportConfig()
-        tcfg.port = config["sip"]["local_port"]
+        tcfg.port = 5060
         tcfg.boundAddr = local_ip
         tcfg.publicAddr = local_ip
         self.ep.transportCreate(pj.PJSIP_TRANSPORT_UDP, tcfg)
 
-        # Set codec priorities from config
         self.ep.codecSetPriority("*", 0)
-        codec_priorities = {"G726-32": 255, "PCMA": 254, "PCMU": 253}
-        for codec in config["rtp"]["preferred_codecs"]:
-            if codec in codec_priorities:
-                self.ep.codecSetPriority(f"{codec}/8000/1", codec_priorities[codec])
-                logging.info(f"Set codec priority: {codec}/8000/1 ({codec_priorities[codec]})")
-            else:
-                logging.warning(f"Unsupported codec in config: {codec}")
+        self.ep.codecSetPriority("PCMA/8000/1", 255)
+        self.ep.codecSetPriority("PCMU/8000/1", 254)
+        logging.info("Codecs set to PCMA/8000/1 (255), PCMU/8000/1 (254)")
 
         self.ep.libStart()
         logging.info("PJSUA2 started")
 
+        config = {
+            "sip": {"username": sip_user, "domain": sip_domain, "password": sip_pass, "local_addr": local_ip},
+            "stt": {"energy_threshold": 500, "min_chunk_ms": 1500, "silence_end_ms": 600},
+            "tts": {"api_key": "your_super_secret_api_key", "base_url": "http://localhost:8000/v1"}
+        }
         self.stt_adapter = STTAdapter(config, logging.getLogger("STT"))
         self.tts_adapter = TTSAdapter(config, logging.getLogger("TTS"))
 
-        # Check TTS server health
         loop = asyncio.get_event_loop()
         if not loop.run_until_complete(self.tts_adapter.check_health()):
             logging.error("TTS server is unavailable. Calls may proceed without audio.")
@@ -326,32 +330,44 @@ class VoIPBot:
 
     def make_call(self, uri):
         call = MyCall(self.account, ep=self.ep, stt_adapter=self.stt_adapter, tts_adapter=self.tts_adapter, loop=self.account.loop)
+        calls.append(call)  # Keep strong reference
         prm = pj.CallOpParam(True)
         call.makeCall(uri, prm)
         self.account.current_call = call
 
     def destroy(self):
         logging.info("Cleaning up...")
-        if self.account and self.account.current_call:
-            try:
-                call = self.account.current_call
+        global calls
+        try:
+            # Hang up all active calls
+            for call in calls[:]:  # Copy to avoid modifying during iteration
                 if call.isActive():
-                    call.hangup(pj.CallOpParam())
-                self.account.current_call = None
-            except Exception as e:
-                logging.error(f"Error cleaning up call: {e}")
-        try:
+                    try:
+                        call.hangup(pj.CallOpParam())
+                        logging.info(f"Hung up call {call.getId()}")
+                        time.sleep(0.1)  # Allow PJSUA2 to process
+                    except Exception as e:
+                        logging.error(f"Error hanging up call {call.getId()}: {e}")
+            # Clear calls list
+            calls.clear()
+            # Delete account
             if self.account:
-                self.account.delete()
-                self.account = None
+                try:
+                    self.account.delete()
+                    self.account = None
+                    logging.info("Account deleted")
+                    time.sleep(0.1)  # Allow PJSUA2 to process
+                except Exception as e:
+                    logging.error(f"Error deleting account: {e}")
+            # Destroy endpoint
+            try:
+                self.ep.libDestroy()
+                logging.info("PJSUA2 endpoint destroyed")
+            except Exception as e:
+                logging.error(f"Error destroying endpoint: {e}")
+            reset_conversation_history()
         except Exception as e:
-            logging.error(f"Error deleting account: {e}")
-        try:
-            self.ep.libDestroy()
-            logging.info("Destroyed")
-        except Exception as e:
-            logging.error(f"Error destroying endpoint: {e}")
-        reset_conversation_history()
+            logging.error(f"Error during cleanup: {e}")
 
 if __name__ == "__main__":
     if len(sys.argv) < 4:
@@ -373,4 +389,9 @@ if __name__ == "__main__":
         loop.run_forever()
     except KeyboardInterrupt:
         logging.info("\nShutting down...")
-        bot.destroy()
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
+            bot.destroy()
+        except Exception as e:
+            logging.error(f"Error during shutdown: {e}")

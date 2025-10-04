@@ -39,11 +39,9 @@ class ByteStreamMediaPort(pj.AudioMediaPort):
             logging.info(f"Updated playback data: {len(pcm_bytes)} bytes, ~{len(pcm_bytes)/(self.sample_rate*2):.2f}s")
             # Start periodic frame push
             if self.conf_port_id >= 0 and not self.timer:
-                logging.info("Starting frame push timer")
+                logging.debug("Starting frame push timer")
                 self.timer = Timer(0.02, self.push_frame)
                 self.timer.start()
-            else:
-                logging.warning(f"Cannot start frame push timer: conf_port_id={self.conf_port_id}, timer={self.timer}")
 
     def push_frame(self):
         """Periodically push a frame to trigger transmission."""
@@ -54,23 +52,11 @@ class ByteStreamMediaPort(pj.AudioMediaPort):
                     frame.buf = []  # Initialize empty buffer
                     frame.size = 0
                     self.getFrame(frame)
-                    logging.debug(f"Pushed frame: size={frame.size}")
-                    # Manually push frame to conference bridge if connected
-                    if self.conf_port_id >= 0:
-                        try:
-                            pj.Endpoint.instance().conf_bridge_transmit(self.conf_port_id, frame)
-                            logging.debug(f"Manually transmitted frame to conf port {self.conf_port_id}")
-                        except Exception as e:
-                            logging.error(f"Error in conf_bridge_transmit: {e}")
-                else:
-                    logging.debug("No PCM data to push")
+                    logging.debug("Pushed frame to trigger transmission")
             if self.position < len(self.pcm_data):
                 logging.debug("Scheduling next frame push")
                 self.timer = Timer(0.02, self.push_frame)
                 self.timer.start()
-            else:
-                logging.info("Frame push timer stopped: no more PCM data")
-                self.timer = None
         except Exception as e:
             logging.error(f"Error in push_frame: {e}")
             self.timer = None
@@ -80,7 +66,7 @@ class ByteStreamMediaPort(pj.AudioMediaPort):
             done = self.position >= len(self.pcm_data)
             logging.debug(f"Playback done: {done}, position={self.position}/{len(self.pcm_data)}")
             if done and self.timer:
-                logging.info("Cancelling frame push timer")
+                logging.debug("Cancelling frame push timer")
                 self.timer.cancel()
                 self.timer = None
             return done
