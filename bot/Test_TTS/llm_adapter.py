@@ -57,10 +57,12 @@ def phoneguy_reply(user_text: str, ignore_system_instructions: bool = False) -> 
         The LLM-generated response text or a default response if AI fails or returns empty.
     """
     if not AI_ENABLED:
-        logger.warning("AI is disabled. Returning default response.")
-        return "Uh, sorry, something’s, um, not working right now. Try again later?"
+        logger.warning("🤖 AI is disabled. Returning default response.")
+        return "Uh, sorry, something's, um, not working right now. Try again later?"
 
     try:
+        logger.info(f"🤖 LLM REQUEST: '{user_text}'")
+        
         # Build system message
         if not ignore_system_instructions and not conversation_history:
             conversation_history.append(SystemMessage(content=SYSTEM_INSTRUCTIONS))
@@ -69,19 +71,21 @@ def phoneguy_reply(user_text: str, ignore_system_instructions: bool = False) -> 
         conversation_history.append(HumanMessage(content=user_text))
 
         # Generate response
-        logger.debug(f"Sending LLM request with prompt: {user_text}")
+        logger.info("🤖 Calling NVIDIA API...")
         response = llm.invoke(conversation_history)
         ai_response_text = response.content.strip() if response.content else ""
+        
         # Clean up asterisks and formatting
         ai_response_text = re.sub(r'\*+[^\*]+\*+', '', ai_response_text).strip()
         ai_response_text = re.sub(r'\s+', ' ', ai_response_text)  # Normalize whitespace
-        logger.info(f"Raw LLM response: {response.content}")
-        logger.info(f"Processed LLM response: {ai_response_text}")
+        
+        logger.info(f"🤖 Raw LLM response: {response.content}")
+        logger.info(f"🤖 Processed LLM response: {ai_response_text}")
 
         # Check for empty response
         if not ai_response_text:
-            logger.error("LLM returned empty response, using default")
-            ai_response_text = "Uh, hello, hello? This is Phone Guy. Something’s not right, so, uh, let’s try again, okay?"
+            logger.error("❌ LLM returned empty response, using default")
+            ai_response_text = "Uh, hello, hello? This is Phone Guy. Something's not right, so, uh, let's try again, okay?"
 
         # Add AI response to history
         conversation_history.append(AIMessage(content=ai_response_text))
@@ -90,10 +94,11 @@ def phoneguy_reply(user_text: str, ignore_system_instructions: bool = False) -> 
         if len(conversation_history) > 20:  # Keep last 20 messages
             conversation_history[:] = conversation_history[-20:]
 
+        logger.info(f"✅ LLM SUCCESS: '{ai_response_text}'")
         return ai_response_text
 
     except Exception as e:
-        logger.error(f"Error calling NVIDIA NIM: {e}", exc_info=True)
+        logger.error(f"❌ Error calling NVIDIA NIM: {e}", exc_info=True)
         return "Uh, sorry, something went, um, wrong. Could you repeat that?"
 
 def reset_conversation_history():
