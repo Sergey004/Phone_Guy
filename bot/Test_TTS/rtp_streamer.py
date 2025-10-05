@@ -126,17 +126,30 @@ class ByteStreamMediaPort(pj.AudioMediaPort):
         with self._lock:
             logging.debug(f"getFrame called, position={self.position}/{len(self.pcm_data)}")
             if self.position >= len(self.pcm_data):
-                frame.buf = []
+                # Return empty frame when no more data
+                frame.type = pj.PJMEDIA_FRAME_TYPE_NONE
                 frame.size = 0
                 logging.debug("No more PCM data to send")
                 return pj.PJ_SUCCESS
 
             # Calculate how many bytes to send in this frame
             bytes_to_send = min(self.frame_size, len(self.pcm_data) - self.position)
-            frame.buf = self.pcm_data[self.position:self.position + bytes_to_send]
-            frame.size = bytes_to_send
+            
+            # Convert bytes to the format expected by PJSIP MediaFrame
+            # MediaFrame expects a list/vector of integers (samples)
+            pcm_samples = []
+            for i in range(0, bytes_to_send, 2):
+                if i + 1 < len(self.pcm_data):
+                    # Convert 2 bytes to 16-bit signed integer (little-endian)
+                    sample = int.from_bytes(self.pcm_data[self.position + i:self.position + i + 2], 
+                                          byteorder='little', signed=True)
+                    pcm_samples.append(sample)
+            
+            frame.buf = pcm_samples
+            frame.size = len(pcm_samples) * 2  # Size in bytes
             self.position += bytes_to_send
-            logging.debug(f"Sending frame: size={frame.size}, position={self.position}/{len(self.pcm_data)}")
+            
+            logging.debug(f"Sending frame: {len(pcm_samples)} samples, {frame.size} bytes, position={self.position}/{len(self.pcm_data)}")
             return pj.PJ_SUCCESS
 
     def update_playback_data(self, pcm_bytes: bytes):
@@ -155,11 +168,10 @@ class ByteStreamMediaPort(pj.AudioMediaPort):
         try:
             with self._lock:
                 if self.position < len(self.pcm_data):
+                    # Create a frame and fill it with data
                     frame = pj.MediaFrame()
-                    frame.buf = []  # Initialize empty buffer
-                    frame.size = 0
                     self.getFrame(frame)
-                    logging.debug("Pushed frame to trigger transmission")
+                    logging.debug(f"Pushed frame: {len(frame.buf) if frame.buf else 0} samples, {frame.size} bytes")
             if self.position < len(self.pcm_data):
                 logging.debug("Scheduling next frame push")
                 self.timer = Timer(0.02, self.push_frame)

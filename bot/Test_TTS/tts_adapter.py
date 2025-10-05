@@ -47,6 +47,9 @@ class TTSAdapter:
 
     async def synthesize(self, text: str, voice: str = None, retries: int = 3) -> bytes:
         voice = voice or self.voice
+        self.logger.info(f"🎤 Начинаем синтез текста: '{text[:50]}...'")
+        self.logger.info(f"🎤 Параметры: model={self.model}, voice={voice}, url={self.base_url}")
+        
         payload = {
             "model": self.model,
             "tokenizer_path": self.tokenizer_path,
@@ -54,68 +57,120 @@ class TTSAdapter:
             "voice": voice
         }
         headers = {"x-api-key": self.api_key}
+        
+        self.logger.info(f"🎤 Отправляем запрос на TTS сервер: {self.base_url}/audio/speech")
+        
         for attempt in range(1, retries + 1):
+            self.logger.info(f"🎤 Попытка синтеза {attempt}/{retries}")
+            
             try:
                 async with httpx.AsyncClient(timeout=30.0) as client:
-                    self.logger.debug(f"Sending TTS request (attempt {attempt}/{retries}): {text[:50]}...")
+                    self.logger.info(f"🎤 Отправка запроса: длина текста = {len(text)}, заголовки = {list(headers.keys())}")
+                    
                     response = await client.post(f"{self.base_url}/audio/speech", json=payload, headers=headers)
-                    response.raise_for_status()
+                    
+                    self.logger.info(f"🎤 Ответ получен: статус = {response.status_code}, длина контента = {len(response.content)} байт")
+                    
+                    if response.status_code != 200:
+                        self.logger.error(f"🎤 Неуспешный статус: {response.status_code}, текст: {response.text}")
+                        response.raise_for_status()
+                    
                     wav_data = response.content
-                    self.logger.debug(f"Received {len(wav_data)} bytes from TTS server")
-
+                    self.logger.info(f"🎤 Получены WAV данные: {len(wav_data)} байт")
+                    
                     # Convert to PCM s16le, 8kHz, mono
                     try:
+                        self.logger.info("🎤 Конвертируем WAV в PCM формат...")
                         process = (
                             ffmpeg.input('pipe:', format='wav')
                             .output('pipe:', format='s16le', ar=self.sample_rate, ac=1)
                             .run_async(pipe_stdin=True, pipe_stdout=True, pipe_stderr=True)
                         )
+                        
+                        self.logger.info("🎤 Запускаем FFmpeg процесс...")
                         pcm_data, stderr = await asyncio.get_event_loop().run_in_executor(None, lambda: process.communicate(input=wav_data))
-                        self.logger.info(f"Decoded PCM: {len(pcm_data)} bytes (~{len(pcm_data)/(self.sample_rate*2):.1f}s)")
+                        
+                        self.logger.info(f"🎤 FFmpeg завершен: PCM данные = {len(pcm_data)} байт")
+                        
+                        if len(pcm_data) == 0:
+                            self.logger.warning("🎤 PCM данные пустые после конвертации")
+                            return b''
+                        
+                        self.logger.info(f"✅ Синтез успешно завершен: {len(pcm_data)} байт PCM данных")
                         return pcm_data
+                        
                     except ffmpeg.Error as e:
                         err_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
-                        self.logger.error(f"FFmpeg decode error on attempt {attempt}/{retries}: {err_msg}")
-                        continue
+                        self.logger.error(f"🎤 Ошибка FFmpeg на попытке {attempt}/{retries}: {err_msg}")
+                        if attempt < retries:
+                            continue
+                        return b''
                     except Exception as e:
-                        self.logger.error(f"Unexpected decode error on attempt {attempt}/{retries}: {e}", exc_info=True)
-                        continue
+                        self.logger.error(f"🎤 Неожиданная ошибка FFmpeg на попытке {attempt}/{retries}: {e}", exc_info=True)
+                        if attempt < retries:
+                            continue
+                        return b''
+                        
             except httpx.HTTPStatusError as e:
-                self.logger.error(f"TTS HTTP error on attempt {attempt}/{retries}: HTTP {e.response.status_code} - {e.response.text}")
+                self.logger.error(f"🎤 HTTP ошибка на попытке {attempt}/{retries}: статус {e.response.status_code}")
+                self.logger.error(f"🎤 Ответ сервера: {e.response.text}")
                 if attempt < retries:
                     await asyncio.sleep(1.0 * attempt)
+                    continue
+                return b''
+                
             except httpx.ReadTimeout as e:
-                self.logger.error(f"TTS ReadTimeout on attempt {attempt}/{retries}: {e}")
+                self.logger.error(f"🎤 Таймаут чтения на попытке {attempt}/{retries}: {e}")
                 if attempt < retries:
                     await asyncio.sleep(1.0 * attempt)
+                    continue
+                return b''
+                
             except httpx.RequestError as e:
-                self.logger.error(f"TTS request error on attempt {attempt}/{retries}: {e}")
+                self.logger.error(f"🎤 Ошибка запроса на попытке {attempt}/{retries}: {e}")
                 if attempt < retries:
                     await asyncio.sleep(1.0 * attempt)
+                    continue
+                return b''
+                
             except Exception as e:
-                self.logger.error(f"TTS synthesize failed on attempt {attempt}/{retries}: {e}", exc_info=True)
+                self.logger.error(f"🎤 Неожиданная ошибка на попытке {attempt}/{retries}: {e}", exc_info=True)
                 if attempt < retries:
                     await asyncio.sleep(1.0 * attempt)
-        self.logger.error("All TTS synthesis attempts failed.")
+                    continue
+                return b''
+        
+        self.logger.error("🎤 Все попытки синтеза завершились неудачей.")
         return b''
 
     async def speak(self, text: str, media_port: 'ByteStreamMediaPort'):
         async with self._speak_lock:
-            self.logger.info(f"Speaking: '{text[:50]}...'")
+            self.logger.info(f"🎤 TTS speak: '{text[:50]}...'")
+            self.logger.info(f"🎤 Media port: {type(media_port).__name__}")
+            self.logger.info(f"🎤 Text length: {len(text)} characters, {len(text.split())} words")
+            
             try:
                 # Wait for TTS server response
+                self.logger.info("🎤 Начинаем синтез речи...")
                 pcm_data = await self.synthesize(text)
+                
+                self.logger.info(f"🎤 Получены PCM данные: {len(pcm_data)} байт")
+                
                 if not pcm_data:
-                    self.logger.warning("No PCM data from synthesize – sending silence.")
+                    self.logger.warning("🎤 Нет PCM данных от synthesize – отправляем тишину.")
                     return
                 
                 # Check if media_port is valid
                 if media_port is None:
-                    self.logger.error("Media port is None, cannot update playback data")
+                    self.logger.error("🎤 Media port is None, cannot update playback data")
                     return
                 
+                self.logger.info("🎤 Обновляем данные воспроизведения в медиа-порту...")
                 # Update media port only after successful synthesis
                 media_port.update_playback_data(pcm_data)
-                self.logger.info("TTS PCM data updated in media port.")
+                self.logger.info("✅ TTS PCM данные успешно обновлены в медиа-порту.")
+                
             except Exception as e:
-                self.logger.error(f"TTS speak error: {e}", exc_info=True)
+                self.logger.error(f"🎤 Ошибка TTS speak: {e}", exc_info=True)
+                self.logger.error(f"🎤 Тип ошибки: {type(e).__name__}")
+                self.logger.error(f"🎤 Детали ошибки: {str(e)}")

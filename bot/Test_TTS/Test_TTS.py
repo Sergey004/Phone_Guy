@@ -32,6 +32,156 @@ class MyAccount(pj.Account):
         info = self.getInfo()
         logging.info(f"Account registration: {info.regIsActive} ({prm.code} {prm.reason})")
 
+    async def immediate_voice_generation_and_answer(self, call):
+        """МГНОВЕННЫЙ ответ на звонок с готовым голосом."""
+        try:
+            logging.info("⚡ МГНОВЕННЫЙ ответ на звонок - начинаем генерацию голоса!")
+            
+            # Сразу генерируем и отвечаем без задержки
+            logging.info("🔍 Проверяем готовность TTS...")
+            
+            # Проверяем готовность TTS
+            tts_ready = await self.tts_adapter.check_health()
+            if not tts_ready:
+                logging.warning("⚠️ TTS не готов, используем предварительно сгенерированный голос")
+                await self.use_pre_generated_voice(call)
+                return
+            
+            # Генерируем текст для ответа
+            logging.info("🤖 Генерируем текст ответа...")
+            greeting_prompt = "A person is calling you. Please greet them warmly and introduce yourself as an AI assistant. Ask how you can help them today."
+            greeting_text = phoneguy_reply(greeting_prompt)
+            logging.info(f"📝 Сгенерирован текст: '{greeting_text}'")
+            
+            # НЕМЕДЛЕННО создаем медиа-порт и генерируем голос
+            logging.info("🔊 НЕМЕДЛЕННО создаем медиа-порт и генерируем голос...")
+            
+            # Создаем медиа-порт для TTS
+            self.media_port = ByteStreamMediaPort(sample_rate=8000)
+            self.media_port.register_with_conf(self.ep)
+            
+            if self.media_port.conf_port_id < 0:
+                logging.error("❌ Не удалось создать медиа-порт")
+                await self.use_pre_generated_voice(call)
+                return
+            
+            logging.info(f"✅ Медиа-порт создан: ID={self.media_port.conf_port_id}")
+            
+            # МГНОВЕННО генерируем голос
+            logging.info("🚀 МГНОВЕННО генерируем голос...")
+            await self.tts_adapter.speak(greeting_text, self.media_port)
+            
+            # Проверяем результат
+            pcm_length = len(getattr(self.media_port, 'pcm_data', b''))
+            if pcm_length > 0:
+                logging.info(f"✅ Голос сгенерирован: {pcm_length} байт")
+                
+                # Сразу сигнализируем о готовности
+                self.media_ready.set()
+                logging.info("✅ Голос готов, сигнализируем о готовности!")
+                
+                # НЕМЕДЛЕННО отвечаем на звонок
+                if call.isActive():
+                    prm = pj.CallOpParam()
+                    prm.statusCode = 200
+                    call.answer(prm)
+                    logging.info("📞 Звонок принят мгновенно - голос готов!")
+                else:
+                    logging.warning("⚠️ Звонок стал неактивным")
+            else:
+                logging.warning("⚠️ Голос не сгенерировался, используем резервный вариант")
+                await self.use_pre_generated_voice(call)
+                
+        except Exception as e:
+            logging.error(f"❌ Ошибка мгновенной генерации: {e}")
+            await self.use_pre_generated_voice(call)
+
+    async def use_pre_generated_voice(self, call):
+        """Использование предварительно сгенерированного голоса как резерв."""
+        try:
+            logging.info("📦 Используем предварительно сгенерированный голос...")
+            
+            # Проверяем, есть ли предварительно сгенерированные сэмплы
+            if hasattr(self, 'pre_generated_samples') and self.pre_generated_samples:
+                # Используем основное приветствие
+                if 'main_greeting' in self.pre_generated_samples:
+                    sample = self.pre_generated_samples['main_greeting']
+                    self.media_port = sample['media_port']
+                    self.media_ready.set()
+                    logging.info("✅ Используем предварительно сгенерированное приветствие")
+                else:
+                    # Используем первый доступный сэмпл
+                    first_sample = next(iter(self.pre_generated_samples.values()))
+                    self.media_port = first_sample['media_port']
+                    self.media_ready.set()
+                    logging.info("✅ Используем предварительно сгенерированный сэмпл")
+                
+                # Отвечаем на звонок
+                if call.isActive():
+                    prm = pj.CallOpParam()
+                    prm.statusCode = 200
+                    call.answer(prm)
+                    logging.info("📞 Звонок принят с предварительно сгенерированным голосом!")
+                else:
+                    logging.warning("⚠️ Звонок стал неактивным")
+            else:
+                logging.error("❌ Нет предварительно сгенерированных сэмплов!")
+                # Отвечаем без голоса как последняя мера
+                if call.isActive():
+                    prm = pj.CallOpParam()
+                    prm.statusCode = 200
+                    call.answer(prm)
+                    logging.warning("📞 Звонок принят без голоса (последняя мера)")
+                    
+        except Exception as e:
+            logging.error(f"❌ Ошибка использования предварительного голоса: {e}")
+            # Отвечаем без голоса
+            if call.isActive():
+                prm = pj.CallOpParam()
+                prm.statusCode = 200
+                call.answer(prm)
+                logging.error("📞 Звонок принят без голоса из-за ошибки")
+
+    async def generate_tts_in_background(self, text: str, call) -> bool:
+        """Фоновая генерация TTS во время задержки."""
+        try:
+            logging.info("🚀 Фоновая генерация TTS начата...")
+            logging.info(f"🚀 Текст для генерации: '{text[:50]}...'")
+            
+            # Создаем временный медиа-порт для фоновой генерации
+            temp_media_port = ByteStreamMediaPort(sample_rate=8000)
+            temp_media_port.register_with_conf(self.ep)
+            
+            if temp_media_port.conf_port_id < 0:
+                logging.error("❌ Не удалось зарегистрировать временный TTS порт")
+                return False
+            
+            logging.info(f"🚀 Временный TTS порт создан: ID={temp_media_port.conf_port_id}")
+            
+            # Генерируем голос асинхронно
+            logging.info("🚀 Начинаем TTS синтез в фоне...")
+            await self.tts_adapter.speak(text, temp_media_port)
+            
+            # Проверяем результат
+            pcm_length = len(getattr(temp_media_port, 'pcm_data', b''))
+            if pcm_length > 0:
+                logging.info(f"✅ Фоновая генерация завершена: {pcm_length} байт PCM данных")
+                
+                # Сохраняем результат в атрибуте звонка для последующего использования
+                call._pre_generated_audio = temp_media_port.pcm_data
+                call._pre_generated_media_port = temp_media_port
+                
+                return True
+            else:
+                logging.warning("⚠️ Фоновая генерация завершилась без данных")
+                return False
+                
+        except Exception as e:
+            logging.error(f"❌ Ошибка в фоновой генерации TTS: {e}")
+            import traceback
+            logging.error(f"❌ TTS Background Traceback: {traceback.format_exc()}")
+            return False
+
     def onIncomingCall(self, prm):
         call = MyCall(self, prm.callId, self.ep, tts_adapter=self.tts_adapter, loop=self.loop)
         calls.append(call)  # Keep strong reference to prevent GC
@@ -39,11 +189,9 @@ class MyAccount(pj.Account):
         ci = call.getInfo()
         logging.info(f"🎧 INCOMING CALL from {ci.remoteUri} - LLM+TTS voice generation will start!")
         
-        # Answer the call immediately to start voice generation
-        prm = pj.CallOpParam()
-        prm.statusCode = 200
-        call.answer(prm)
-        logging.info("📞 Call answered - preparing LLM+TTS voice generation...")
+        # Немедленно запускаем генерацию голоса при входящем звонке
+        logging.info("⚡ НЕМЕДЛЕННО запускаем генерацию голоса при входящем звонке!")
+        self.loop.create_task(self.immediate_voice_generation_and_answer(call))
 
 class MyCall(pj.Call):
     def __init__(self, acc, call_id=pj.PJSUA_INVALID_ID, ep=None, tts_adapter=None, loop=None):
@@ -155,10 +303,29 @@ class MyCall(pj.Call):
         # TTS synthesize and play the greeting to the caller
         try:
             logging.info("🔊 CONVERTING LLM greeting to speech for caller...")
+            logging.info(f"🎵 TTS Media Port Status: conf_port_id={self.media_port.conf_port_id}, position={self.media_port.position}")
+            logging.info(f"🎵 TTS Adapter Status: {self.tts_adapter}")
+            logging.info(f"🎵 TTS Config: {getattr(self.tts_adapter, 'base_url', 'unknown')}")
+            
+            # Детальное логирование процесса TTS
+            logging.info("🎵 Начинаем TTS синтез...")
             await self.tts_adapter.speak(greeting_text, self.media_port)
-            logging.info("✅ TTS voice GREETING completed - caller heard the AI voice!")
+            
+            # Проверяем результат после TTS
+            pcm_data_length = len(getattr(self.media_port, 'pcm_data', b''))
+            logging.info(f"🎵 После TTS: PCM данные = {pcm_data_length} байт")
+            
+            if pcm_data_length > 0:
+                logging.info("✅ TTS voice GREETING completed successfully!")
+                logging.info(f"🎵 Final TTS Media Port Status: position={self.media_port.position}/{pcm_data_length}")
+            else:
+                logging.warning("⚠️ TTS завершился, но PCM данные пустые!")
+                
         except Exception as e:
             logging.error(f"❌ TTS voice greeting failed: {e}")
+            logging.error(f"❌ TTS Error Details: {type(e).__name__}: {str(e)}")
+            import traceback
+            logging.error(f"❌ TTS Traceback: {traceback.format_exc()}")
         
         # Keep call alive for interaction (extended duration for potential conversation)
         greeting_duration = len(greeting_text.split()) * 0.5 + 5  # Calculate greeting duration + buffer
@@ -365,6 +532,10 @@ class VoIPBot:
         acc_cfg.sipConfig.authCreds.append(pj.AuthCredInfo("digest", "*", sip_user, 0, sip_pass))
         self.account = MyAccount(self.ep, self.tts_adapter, loop)
         self.account.create(acc_cfg)
+        
+        # Предварительная генерация голосовых сэмплов
+        logging.info("🎯 Запускаем предварительную генерацию голосовых сэмплов...")
+        loop.create_task(self.pre_generate_voice_samples())
 
     def make_call(self, uri):
         call = MyCall(self.account, ep=self.ep, tts_adapter=self.tts_adapter, loop=self.account.loop)
@@ -372,6 +543,100 @@ class VoIPBot:
         prm = pj.CallOpParam(True)
         call.makeCall(uri, prm)
         self.account.current_call = call
+
+    async def pre_generate_voice_samples(self):
+        """Предварительная генерация голосовых сэмплов для ускорения ответа на звонки."""
+        try:
+            logging.info("🎯 Начинаем предварительную генерацию голосовых сэмпров...")
+            
+            # Проверяем готовность TTS сервера
+            if not await self.tts_adapter.check_health():
+                logging.error("❌ TTS сервер не готов для предварительной генерации")
+                return
+            
+            # Генерируем несколько стандартных фраз заранее
+            sample_texts = [
+                "Hello! This is your AI assistant. How can I help you today?",
+                "Hi there! Welcome to our service. What can I do for you?",
+                "Good day! I'm here to assist you. Please go ahead with your question.",
+                "Hello and welcome! I'm ready to help you with anything you need.",
+                "Hi! Thank you for calling. I'm your AI assistant, how may I assist you?"
+            ]
+            
+            self.pre_generated_samples = {}
+            
+            for i, text in enumerate(sample_texts):
+                try:
+                    logging.info(f"🎯 Генерируем сэмпл {i+1}/{len(sample_texts)}: '{text[:50]}...'")
+                    
+                    # Создаем временный медиа-порт для генерации
+                    temp_port = ByteStreamMediaPort(sample_rate=8000)
+                    temp_port.register_with_conf(self.ep)
+                    
+                    if temp_port.conf_port_id < 0:
+                        logging.error(f"❌ Не удалось создать медиа-порт для сэмпла {i+1}")
+                        continue
+                    
+                    # Генерируем голос
+                    await self.tts_adapter.speak(text, temp_port)
+                    
+                    # Сохраняем результат
+                    pcm_data = getattr(temp_port, 'pcm_data', b'')
+                    if len(pcm_data) > 0:
+                        self.pre_generated_samples[f"sample_{i}"] = {
+                            'text': text,
+                            'pcm_data': pcm_data,
+                            'media_port': temp_port,
+                            'length': len(pcm_data)
+                        }
+                        logging.info(f"✅ Сэмпл {i+1} готов: {len(pcm_data)} байт")
+                    else:
+                        logging.warning(f"⚠️ Сэмпл {i+1} пустой")
+                        
+                except Exception as e:
+                    logging.error(f"❌ Ошибка при генерации сэмпла {i+1}: {e}")
+                    continue
+            
+            # Генерируем основное приветствие для входящих звонков
+            logging.info("🎯 Генерируем основное приветствие для входящих звонков...")
+            main_greeting = "A person is calling you. Please greet them warmly and introduce yourself as an AI assistant. Ask how you can help them today."
+            
+            main_text = phoneguy_reply(main_greeting)
+            logging.info(f"🎯 Основное приветствие: '{main_text}'")
+            
+            # Создаем порт для основного приветствия
+            main_port = ByteStreamMediaPort(sample_rate=8000)
+            main_port.register_with_conf(self.ep)
+            
+            if main_port.conf_port_id >= 0:
+                await self.tts_adapter.speak(main_text, main_port)
+                pcm_main = getattr(main_port, 'pcm_data', b'')
+                
+                if len(pcm_main) > 0:
+                    self.pre_generated_samples['main_greeting'] = {
+                        'text': main_text,
+                        'pcm_data': pcm_main,
+                        'media_port': main_port,
+                        'length': len(pcm_main)
+                    }
+                    logging.info(f"✅ Основное приветствие готово: {len(pcm_main)} байт")
+                else:
+                    logging.warning("⚠️ Основное приветствие пустое")
+            else:
+                logging.error("❌ Не удалось создать порт для основного приветствия")
+            
+            total_samples = len(self.pre_generated_samples)
+            total_size = sum(sample['length'] for sample in self.pre_generated_samples.values())
+            
+            logging.info(f"🎯 Предварительная генерация завершена!")
+            logging.info(f"🎯 Сгенерировано сэмплов: {total_samples}")
+            logging.info(f"🎯 Общий размер данных: {total_size} байт")
+            logging.info(f"🎯 Система готова к быстрому ответу на звонки!")
+            
+        except Exception as e:
+            logging.error(f"❌ Ошибка в предварительной генерации: {e}")
+            import traceback
+            logging.error(f"❌ Pre-generation Traceback: {traceback.format_exc()}")
 
     def destroy(self):
         logging.info("Cleaning up...")
@@ -387,6 +652,19 @@ class VoIPBot:
                     except Exception as e:
                         logging.error(f"Error hanging up call {call.getId()}: {e}")
             calls.clear()
+            
+            # Clean up pre-generated samples
+            if hasattr(self, 'pre_generated_samples'):
+                logging.info(f"🧹 Очищаем {len(self.pre_generated_samples)} предварительно сгенерированных сэмплов")
+                for key, sample in self.pre_generated_samples.items():
+                    if 'media_port' in sample and sample['media_port']:
+                        try:
+                            # Clean up media ports if needed
+                            sample['media_port'] = None
+                        except Exception as e:
+                            logging.warning(f"⚠️ Ошибка при очистке сэмпла {key}: {e}")
+                self.pre_generated_samples.clear()
+            
             # Delete account
             if self.account:
                 self.account.delete()
