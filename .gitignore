@@ -23,4 +23,4 @@ variables.txt
 *.wav
 *.mp3
 *.json
-pyVoIP/
+pjproject/pjsip-apps/src
