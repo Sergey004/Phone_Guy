@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import time
 import logging
 import pjsua2 as pj
@@ -7,10 +9,10 @@ import threading
 import queue
 import asyncio
 import os
-from rtp_streamer import ByteStreamMediaPort  # Для TTS
-from tts_adapter import TTSAdapter
+from Libs.rtp_streamer import ByteStreamMediaPort  # Для TTS
+from Libs.tts_adapter import TTSAdapter
 # Use the local LLM adapter from Test_TTS folder
-from llm_adapter import phoneguy_reply, reset_conversation_history
+from Libs.llm_adapter import phoneguy_reply, reset_conversation_history
 
 logging.basicConfig(
     level=logging.DEBUG,

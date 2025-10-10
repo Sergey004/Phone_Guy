@@ -9,10 +9,10 @@ import threading
 import queue
 import json
 import os
-from rtp_streamer import ByteStreamMediaPort
-from Adapters.stt_adapter import STTAdapter
-from Adapters.tts_adapter import TTSAdapter
-from Adapters.llm_adapter import phoneguy_reply
+from Libs.rtp_streamer import ByteStreamMediaPort
+from Libs.stt_adapter import STTAdapter
+from Libs.tts_adapter import TTSAdapter
+from Libs.llm_adapter import phoneguy_reply
 import asyncio
 
 logging.basicConfig(

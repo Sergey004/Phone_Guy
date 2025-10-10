@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import time
 import logging
 import pjsua2 as pj
 import threading
 import queue
-from rtp_streamer import RtpStreamerMediaPort
-from wav_converter import ensure_pjsua_compatible
+from Libs.rtp_streamer import RtpStreamerMediaPort
+from Libs.wav_converter import ensure_pjsua_compatible
 
 logging.basicConfig(
     level=logging.DEBUG,

@@ -5,7 +5,7 @@ import os
 import re
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from ai_config import DEFAULT_PROMPT
+from .ai_config import DEFAULT_PROMPT
 
 logging.basicConfig(
     level="INFO",

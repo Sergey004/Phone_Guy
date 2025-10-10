@@ -4,7 +4,7 @@ import logging
 import httpx
 import ffmpeg
 import rich.logging
-from rtp_streamer import ByteStreamMediaPort
+from .rtp_streamer import ByteStreamMediaPort
 
 logging.basicConfig(
     level="INFO",
