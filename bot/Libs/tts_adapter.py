@@ -143,7 +143,7 @@ class TTSAdapter:
         self.logger.error("🎤 Все попытки синтеза завершились неудачей.")
         return b''
 
-    async def speak(self, text: str, media_port: 'ByteStreamMediaPort'):
+    async def speak(self, text: str, media_port: 'ByteStreamMediaPort', media_ready_event=None):
         async with self._speak_lock:
             self.logger.info(f"🎤 TTS speak: '{text[:50]}...'")
             self.logger.info(f"🎤 Media port: {type(media_port).__name__}")
@@ -169,6 +169,8 @@ class TTSAdapter:
                 # Update media port only after successful synthesis
                 media_port.update_playback_data(pcm_data)
                 self.logger.info("✅ TTS PCM данные успешно обновлены в медиа-порту.")
+                if media_ready_event:
+                    media_ready_event.set()
                 
             except Exception as e:
                 self.logger.error(f"🎤 Ошибка TTS speak: {e}", exc_info=True)

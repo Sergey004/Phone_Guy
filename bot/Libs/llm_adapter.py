@@ -26,12 +26,13 @@ if NVIDIA_API_KEY:
         llm = ChatNVIDIA(
             api_key=NVIDIA_API_KEY,
             base_url=NVIDIA_API_BASE if NVIDIA_API_BASE else None,
-            model=os.getenv("NVIDIA_MODEL", "deepseek-ai/deepseek-r1"),
+            model=os.getenv("NVIDIA_MODEL"),
             temperature=0.6,
             top_p=0.7,
-            max_tokens=4096
+            max_tokens=4096,
+            extra_body={"chat_template_kwargs": {"thinking":False}}
         )
-        logger.info("NVIDIA API configured with model: deepseek-ai/deepseek-r1")
+        logger.info(f"NVIDIA API configured with model: {os.getenv('NVIDIA_MODEL')}")
         AI_ENABLED = True
     except Exception as e:
         logger.error(f"Error initializing NVIDIA API: {e}", exc_info=True)

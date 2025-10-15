@@ -118,7 +118,6 @@ class ByteStreamMediaPort(pj.AudioMediaPort):
         self._lock = Lock()
         self.conf_port_id: int = -1
         self.frame_size: int = sample_rate // 50 * 2  # 20ms frames, 16-bit samples
-        self.timer = None
         self.fmt=fmt
         logging.info(f"Initialized ByteStreamMediaPort with sample_rate={sample_rate}, frame_size={self.frame_size}")
 
@@ -126,10 +125,11 @@ class ByteStreamMediaPort(pj.AudioMediaPort):
         with self._lock:
             logging.debug(f"getFrame called, position={self.position}/{len(self.pcm_data)}")
             if self.position >= len(self.pcm_data):
-                # Return empty frame when no more data
-                frame.type = pj.PJMEDIA_FRAME_TYPE_NONE
-                frame.size = 0
-                logging.debug("No more PCM data to send")
+                # Return silence frame when no more data
+                frame.type = pj.PJMEDIA_FRAME_TYPE_AUDIO
+                frame.size = self.frame_size
+                frame.buf = [0] * (self.frame_size // 2)  # Fill with silence (int16 samples)
+                logging.debug("No more PCM data to send, sending silence")
                 return pj.PJ_SUCCESS
 
             # Calculate how many bytes to send in this frame
@@ -157,37 +157,11 @@ class ByteStreamMediaPort(pj.AudioMediaPort):
             self.pcm_data = pcm_bytes
             self.position = 0
             logging.info(f"Updated playback data: {len(pcm_bytes)} bytes, ~{len(pcm_bytes)/(self.sample_rate*2):.2f}s")
-            # Start periodic frame push
-            if self.conf_port_id >= 0 and not self.timer:
-                logging.debug("Starting frame push timer")
-                self.timer = Timer(0.02, self.push_frame)
-                self.timer.start()
-
-    def push_frame(self):
-        """Periodically push a frame to trigger transmission."""
-        try:
-            with self._lock:
-                if self.position < len(self.pcm_data):
-                    # Create a frame and fill it with data
-                    frame = pj.MediaFrame()
-                    self.getFrame(frame)
-                    logging.debug(f"Pushed frame: {len(frame.buf) if frame.buf else 0} samples, {frame.size} bytes")
-            if self.position < len(self.pcm_data):
-                logging.debug("Scheduling next frame push")
-                self.timer = Timer(0.02, self.push_frame)
-                self.timer.start()
-        except Exception as e:
-            logging.error(f"Error in push_frame: {e}")
-            self.timer = None
 
     def is_playback_done(self) -> bool:
         with self._lock:
             done = self.position >= len(self.pcm_data)
             logging.debug(f"Playback done: {done}, position={self.position}/{len(self.pcm_data)}")
-            if done and self.timer:
-                logging.debug("Cancelling frame push timer")
-                self.timer.cancel()
-                self.timer = None
             return done
 
     def register_with_conf(self, ep: pj.Endpoint):
