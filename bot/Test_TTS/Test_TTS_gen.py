@@ -11,14 +11,16 @@ import wave
 logging.basicConfig(level=logging.INFO)
 
 async def test_tts_library():
-    # Конфигурация (замените на ваши реальные значения)
+    # Конфигурация
     config = {
         'tts': {
-            'api_key': 'your_super_secret_api_key',
-            'base_url': 'http://localhost:8000/v1',  # URL вашего TTS-сервера
-            'model': '1.5B',
-            'tokenizer_path': 'Qwen/Qwen2.5-7B',
-            'voice': 'PhoneGuy_FNAF1_01'
+            'engine': 'turbo',
+            'device': 'cuda',
+            'audio_prompt_path': 'voices/PhoneGuy_FNAF1_01.wav',
+            "rvc_enabled": True,
+            "rvc_model_path": "models/RVC/PhoneGuyFNAF1/PhoneGuyFNAF1_e1000_s22000.pth",
+            "rvc_index_path": "models/RVC/PhoneGuyFNAF1/added_IVF339_Flat_nprobe_1_PhoneGuyFNAF1_v2.index", 
+            "rvc_pitch_shift": 0
         }
     }
     logger = logging.getLogger('TTS_Test')
@@ -34,13 +36,13 @@ async def test_tts_library():
         return  # Прерываем, если сервер не готов
     
     # 2. Генерация текста с помощью LLM
-    llm_response_text = phoneguy_reply("Скажи что-нибудь о погоде. В твоей локации.")
+    llm_response_text = phoneguy_reply("Скажи что-нибудь о погоде. В твоей локации и ещё о себе кто ты и чем ты занимаешся.")
     text_to_synthesize = llm_response_text if llm_response_text else "Hello, this is a test message."
     logger.info(f"LLM сгенерировала текст: {text_to_synthesize}")
 
     # 3. Синтез речи
     logger.info(f"Синтезируем текст: '{text_to_synthesize}'")
-    pcm_data = await tts.synthesize(text_to_synthesize, voice=tts.voice, retries=3)
+    pcm_data = await tts.synthesize(text_to_synthesize, retries=3)
     if pcm_data:
         logger.info(f"✅ Синтез успешен! Получено {len(pcm_data)} байт PCM-данных.")
 

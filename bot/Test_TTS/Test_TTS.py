@@ -258,9 +258,12 @@ class VoIPBot:
         self.ep.libStart()
         logging.info("PJSUA2 started")
 
-        # Config for TTS
         config = {
-            "tts": {"api_key": "your_super_secret_api_key", "base_url": "http://localhost:8000/v1"}
+            "tts": {
+                "engine": "turbo",
+                "device": "cpu",
+                "audio_prompt_path": "/home/user/Test_Phone/voices/PhoneGuy_FNAF1_01.wav"
+            }
         }
         self.tts_adapter = TTSAdapter(config, logging.getLogger("TTS"))
 

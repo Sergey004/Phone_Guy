@@ -216,7 +216,7 @@ if __name__ == "__main__":
     domain, user, passwd = sys.argv[1:4]
     
     import os
-    if not os.path.exists("output_phone.wav"):
+    if not os.path.exists("/home/user/Test_Phone/bot/Test_RTP/output_phone.wav"):
         logging.error("ERROR: output_phone.wav not found!")
         sys.exit(1)
     

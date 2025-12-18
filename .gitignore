@@ -24,3 +24,4 @@ variables.txt
 *.mp3
 *.json
 pjproject/pjsip-apps/src
+models/*

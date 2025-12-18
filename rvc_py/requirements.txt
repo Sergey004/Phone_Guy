@@ -1,0 +1,10 @@
+torch
+numpy
+librosa
+soundfile
+scipy
+torchcrepe
+faiss-cpu
+parselmouth
+onnxruntime
+pyworld
