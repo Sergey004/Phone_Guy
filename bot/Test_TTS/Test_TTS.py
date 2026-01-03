@@ -6,9 +6,10 @@ import time
 import asyncio
 import logging
 import pjsua2 as pj
-from Libs.rtp_streamer import ByteStreamMediaPort  # Для TTS
+from Libs.audio import AudioPlaybackPort  # Для TTS
 from Libs.tts_adapter import TTSAdapter
 from Libs.llm_adapter import phoneguy_reply, reset_conversation_history
+import wave
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -66,10 +67,8 @@ class MyAccount(pj.Account):
             logging.info(f"📝 Сгенерирован текст: '{greeting_text}'")
 
             # Создаем медиа-порт для TTS
-            media_port = ByteStreamMediaPort(sample_rate=8000)
-            media_port.register_with_conf(self.ep)
-            
-            if media_port.conf_port_id < 0:
+            media_port = AudioPlaybackPort(sample_rate=8000, logger=logging.getLogger("AudioPlayback"))
+            if not media_port.register_with_conf(self.ep):
                 logging.error("❌ Не удалось создать медиа-порт")
                 await self.use_pre_generated_voice(call)
                 return
@@ -81,8 +80,6 @@ class MyAccount(pj.Account):
             try:
                 await self.tts_adapter.speak(greeting_text, media_port)
                 logging.info("✅ Голос сгенерирован и воспроизводится")
-
-                # Ожидаем готовности медиапотока с таймаутом
                 logging.info("⏳ Ожидаем готовности медиапотока...")
                 try:
                     await asyncio.wait_for(call.media_ready.wait(), timeout=10)
@@ -90,26 +87,44 @@ class MyAccount(pj.Account):
                 except asyncio.TimeoutError:
                     logging.error("❌ Таймаут ожидания медиапотока")
                     return
-
-                # Подключаем медиа-порт к аудио потоку звонка
-                try:
-                    audio_media = call.getAudioMedia(-1)
-                    media_port.startTransmit(audio_media)
-                    logging.info("✅ Медиа-порт подключен к аудио потоку")
-                except Exception as e:
-                    logging.error(f"❌ Ошибка подключения медиа-порта: {e}")
-                    await self.use_pre_generated_voice(call)
-                    return
-                
-                # Ждем завершения воспроизведения
-                greeting_duration = len(greeting_text.split()) * 0.5 + 2
-                logging.info(f"⏳ Ждем {greeting_duration:.1f} секунд для завершения приветствия...")
-                await asyncio.sleep(greeting_duration)
-                
             except Exception as e:
                 logging.error(f"❌ Ошибка генерации голоса: {e}")
                 await self.use_pre_generated_voice(call)
                 return
+
+            # Подключаем медиа-порт к аудио потоку звонка
+            try:
+                try:
+                    audio_media = call.getAudioMedia(0)
+                except Exception:
+                    audio_media = call.getMedia(0)
+                media_port.startTransmit(audio_media)
+                logging.info("✅ Медиа-порт подключен к аудио потоку")
+            except Exception as e:
+                logging.error(f"❌ Ошибка подключения медиа-порта: {e}")
+                # Fallback: синтезируем PCM и проигрываем через AudioMediaPlayer
+                try:
+                    pcm = await self.tts_adapter.synthesize(greeting_text)
+                    if pcm:
+                        temp_wav = "temp_tts_fallback.wav"
+                        with wave.open(temp_wav, "wb") as wf:
+                            wf.setnchannels(1)
+                            wf.setsampwidth(2)
+                            wf.setframerate(8000)
+                            wf.writeframes(pcm)
+                        player = pj.AudioMediaPlayer()
+                        player.createPlayer(temp_wav, 0)
+                        player.startTransmit(audio_media)
+                        logging.info("✅ Fallback AudioMediaPlayer запущен")
+                except Exception as pe:
+                    logging.error(f"❌ Fallback проигрывание не удалось: {pe}")
+                    await self.use_pre_generated_voice(call)
+                return
+            
+            # Ждем завершения воспроизведения
+            greeting_duration = len(greeting_text.split()) * 0.5 + 2
+            logging.info(f"⏳ Ждем {greeting_duration:.1f} секунд для завершения приветствия...")
+            await asyncio.sleep(greeting_duration)
 
             # Завершаем звонок после приветствия
             if call.isActive():
@@ -151,10 +166,8 @@ class MyAccount(pj.Account):
                 return
             
             # Создаем медиа-порт для предварительного голоса
-            media_port = ByteStreamMediaPort(sample_rate=8000)
-            media_port.register_with_conf(self.ep)
-            
-            if media_port.conf_port_id < 0:
+            media_port = AudioPlaybackPort(sample_rate=8000, logger=logging.getLogger("AudioPlayback"))
+            if not media_port.register_with_conf(self.ep):
                 logging.error("❌ Не удалось создать медиа-порт для предварительного голоса")
                 return
             
@@ -262,7 +275,12 @@ class VoIPBot:
             "tts": {
                 "engine": "turbo",
                 "device": "cpu",
-                "audio_prompt_path": "/home/user/Test_Phone/voices/PhoneGuy_FNAF1_01.wav"
+                "audio_prompt_path": "/home/user/Test_Phone/voices/PhoneGuy_FNAF1_01.wav",
+                "rvc_enabled": True,
+                "rvc_model_path": "/home/user/Test_Phone/models/RVC/PhoneGuyFNAF1/PhoneGuyFNAF1_e1000_s22000.pth",
+                "rvc_index_path": "/home/user/Test_Phone/models/RVC/PhoneGuyFNAF1/added_IVF339_Flat_nprobe_1_PhoneGuyFNAF1_v2.index",
+                "rvc_index_rate": 0.5,
+                "rvc_f0_method": "rmvpe"
             }
         }
         self.tts_adapter = TTSAdapter(config, logging.getLogger("TTS"))
@@ -317,10 +335,8 @@ class VoIPBot:
                     logging.info(f"🎯 Генерируем сэмпл {i+1}/{len(sample_texts)}: '{text[:50]}...'")
                     
                     # Создаем временный медиа-порт для генерации
-                    temp_port = ByteStreamMediaPort(sample_rate=8000)
-                    temp_port.register_with_conf(self.ep)
-                    
-                    if temp_port.conf_port_id < 0:
+                    temp_port = AudioPlaybackPort(sample_rate=8000, logger=logging.getLogger("AudioPlayback"))
+                    if not temp_port.register_with_conf(self.ep):
                         logging.error(f"❌ Не удалось создать медиа-порт для сэмпла {i+1}")
                         continue
                     
@@ -351,10 +367,10 @@ class VoIPBot:
             logging.info(f"🎯 Основное приветствие: '{main_text}'")
             
             # Создаем порт для основного приветствия
-            main_port = ByteStreamMediaPort(sample_rate=8000)
-            main_port.register_with_conf(self.ep)
-            
-            if main_port.conf_port_id >= 0:
+            main_port = AudioPlaybackPort(sample_rate=8000, logger=logging.getLogger("AudioPlayback"))
+            if not main_port.register_with_conf(self.ep):
+                logging.error("❌ Не удалось создать порт для основного приветствия")
+            else:
                 await self.tts_adapter.speak(main_text, main_port)
                 pcm_main = getattr(main_port, 'pcm_data', b'')
                 
@@ -367,8 +383,6 @@ class VoIPBot:
                     logging.info(f"✅ Основное приветствие готово: {len(pcm_main)} байт")
                 else:
                     logging.warning("⚠️ Основное приветствие пустое")
-            else:
-                logging.error("❌ Не удалось создать порт для основного приветствия")
             
             total_samples = len(self.account.pre_generated_samples)
             total_size = sum(sample['length'] for sample in self.account.pre_generated_samples.values())
@@ -417,8 +431,40 @@ class VoIPBot:
             logging.error(f"Error during cleanup: {e}")
 
 if __name__ == "__main__":
+    if "--tts-only" in sys.argv:
+        async def tts_only():
+            config = {
+                "tts": {
+                    "engine": "turbo",
+                    "device": "cpu",
+                    "audio_prompt_path": "voices/PhoneGuy_FNAF1_01.wav",
+                    "rvc_enabled": True,
+                    "rvc_model_path": "models/RVC/PhoneGuyFNAF1/PhoneGuyFNAF1_e1000_s22000.pth",
+                    "rvc_index_path": "models/RVC/PhoneGuyFNAF1/added_IVF339_Flat_nprobe_1_PhoneGuyFNAF1_v2.index",
+                    "rvc_index_rate": 0.5,
+                    "rvc_f0_method": "rmvpe"
+                }
+            }
+            tts = TTSAdapter(config, logging.getLogger("TTS"))
+            ok = await tts.check_health()
+            if not ok:
+                logging.error("TTS health check failed")
+                return
+            text = "Hello, this is a test of the voice."
+            pcm = await tts.synthesize(text)
+            if not pcm:
+                logging.error("No PCM data generated")
+                return
+            with wave.open("output.wav", "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(8000)
+                wf.writeframes(pcm)
+            logging.info("Wrote output.wav")
+        asyncio.run(tts_only())
+        sys.exit(0)
     if len(sys.argv) < 4:
-        print(f"Usage: {sys.argv[0]} <domain> <user> <password> [sip:target@domain]")
+        print(f"Usage: {sys.argv[0]} <domain> <user> <password> [sip:target@domain] [--tts-only]")
         sys.exit(1)
 
     domain, user, passwd = sys.argv[1:4]

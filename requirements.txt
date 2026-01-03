@@ -9,8 +9,8 @@ chromadb
 langchain-community
 langchain-nvidia-ai-endpoints
 scipy
-nvidia-riva-client
 chatterbox-tts
 torch
 torchaudio
 chatterbox-tts
+faster-whisper

@@ -7,7 +7,7 @@ import logging
 import pjsua2 as pj
 import threading
 import queue
-from Libs.rtp_streamer import RtpStreamerMediaPort
+from Libs.audio import AudioPlaybackPort, AudioCapturePort
 from Libs.wav_converter import ensure_pjsua_compatible
 
 logging.basicConfig(
@@ -40,7 +40,9 @@ class MyAccount(pj.Account):
 class MyCall(pj.Call):
     def __init__(self, acc, call_id=pj.PJSUA_INVALID_ID, ep=None, wav_file="output_phone.wav"):
         super().__init__(acc, call_id)
-        self.rtp_port = None
+        self.playback_port = None
+        self.capture_port = None
+        self.recorder = None
         self.ep = ep
         self.wav_file = wav_file
         self.timer = None
@@ -51,13 +53,16 @@ class MyCall(pj.Call):
         logging.info(f"Call state: {ci.stateText}")
         if ci.state == pj.PJSIP_INV_STATE_DISCONNECTED:
             logging.info("Call disconnected")
-            if self.rtp_port:
+            if self.recorder:
                 try:
-                    self.rtp_port.save_to_wav("captured_audio.wav")
-                    logging.info("Recording saved")
+                    logging.info("Recording saved to captured_audio.wav")
                 except Exception as e:
-                    logging.error(f"Error saving recording: {e}")
-                self.rtp_port = None
+                    logging.error(f"Error with recording: {e}")
+                self.recorder = None
+            if self.playback_port:
+                self.playback_port = None
+            if self.capture_port:
+                self.capture_port = None
             if self.timer:
                 self.timer.cancel()
                 self.timer = None
@@ -78,20 +83,32 @@ class MyCall(pj.Call):
                     compatible_file = ensure_pjsua_compatible(self.wav_file, target_rate=8000)
                     logging.info(f"Using audio file: {compatible_file}")
                     
-                    # Create player and recorder
-                    self.rtp_port = RtpStreamerMediaPort(compatible_file, clock_rate=8000)
-                    self.rtp_port.createPlayer()
-                    self.rtp_port.createRecorder("captured_audio.wav")
-                    logging.info("Player and recorder created")
+                    # Read PCM data from WAV file
+                    import soundfile as sf
+                    data, sr = sf.read(compatible_file, dtype='int16')
+                    if data.ndim > 1:
+                        data = data[:, 0]
+                    pcm_bytes = data.tobytes()
+                    logging.info(f"Loaded PCM data: {len(pcm_bytes)} bytes")
                     
-                    # Connect for playback
-                    logging.info(f"Connecting player to audio media {audio_media.getPortId()}")
-                    self.rtp_port.startTransmit(audio_media)
-                    logging.info("✓ Playback enabled")
+                    # Create playback port with AudioPlaybackPort
+                    self.playback_port = AudioPlaybackPort(
+                        pcm_bytes=pcm_bytes,
+                        sample_rate=8000,
+                        logger=logging.getLogger("AudioPlayback")
+                    )
+                    if self.playback_port.register_with_conf(self.ep):
+                        logging.info("Playback port registered successfully")
+                        # Connect for playback
+                        self.playback_port.startTransmit(audio_media)
+                        logging.info("✓ Playback enabled")
+                    else:
+                        logging.error("Failed to register playback port")
                     
-                    # Connect for recording
-                    logging.info(f"Connecting audio media {audio_media.getPortId()} to recorder")
-                    self.rtp_port.receiveFrom(audio_media)
+                    # Create recorder for capturing audio
+                    self.recorder = pj.AudioMediaRecorder()
+                    self.recorder.createRecorder("captured_audio.wav")
+                    audio_media.startTransmit(self.recorder)
                     logging.info("✓ Recording enabled")
                     
                     # Start timer to check playback completion
@@ -103,17 +120,17 @@ class MyCall(pj.Call):
                     import traceback
                     traceback.print_exc()
                     try:
-                        self.rtp_port = None
-                        recorder = pj.AudioMediaRecorder()
-                        recorder.createRecorder("captured_audio.wav")
-                        audio_media.startTransmit(recorder)
+                        # Fallback to simple recorder
+                        self.recorder = pj.AudioMediaRecorder()
+                        self.recorder.createRecorder("captured_audio.wav")
+                        audio_media.startTransmit(self.recorder)
                         logging.info("✓ Fallback recording enabled")
                     except Exception as fallback_e:
                         logging.error(f"Failed fallback recorder: {fallback_e}")
 
     def check_playback_done(self):
         try:
-            if self.rtp_port and self.isActive() and self.rtp_port.is_playback_done():
+            if self.playback_port and self.isActive() and self.playback_port.is_playback_done():
                 logging.info("Playback completed, queuing hangup")
                 self.hangup_queue.put(True)  # Signal hangup
             else:
@@ -183,13 +200,9 @@ class VoIPBot:
                 call = self.account.current_call
                 if call.isActive():
                     call.hangup(pj.CallOpParam())
-                if call.rtp_port:
-                    try:
-                        call.rtp_port.save_to_wav("captured_audio.wav")
-                        logging.info("Recording saved")
-                    except Exception as e:
-                        logging.error(f"Error saving recording: {e}")
-                    call.rtp_port = None
+                # Recording is automatically saved by AudioMediaRecorder
+                if call.recorder:
+                    logging.info("Recording saved to captured_audio.wav")
                 self.account.current_call = None
             except Exception as e:
                 logging.error(f"Error cleaning up call: {e}")

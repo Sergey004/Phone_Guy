@@ -22,7 +22,7 @@ import rich.logging
 from chatterbox.tts import ChatterboxTTS
 from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 from chatterbox.tts_turbo import ChatterboxTurboTTS
-from .rtp_streamer import ByteStreamMediaPort
+from .audio import AudioPlaybackPort
 logging.getLogger('numba').setLevel(logging.WARNING)
 
 
@@ -151,7 +151,7 @@ class TTSAdapter:
                     continue
                 return b''
 
-    async def speak(self, text: str, media_port: 'ByteStreamMediaPort', media_ready_event=None):
+    async def speak(self, text: str, media_port: 'AudioPlaybackPort', media_ready_event=None):
         async with self._speak_lock:
             self.logger.info(f"🎤 TTS speak: '{text[:50]}...'")
             self.logger.info(f"🎤 Media port: {type(media_port).__name__}")
@@ -174,9 +174,16 @@ class TTSAdapter:
                     return
                 
                 self.logger.info("🎤 Обновляем данные воспроизведения в медиа-порту...")
-                # Update media port only after successful synthesis
-                media_port.update_playback_data(pcm_data)
-                self.logger.info("✅ TTS PCM данные успешно обновлены в медиа-порту.")
+                # Update media port with validation
+                success = media_port.update_playback_data(pcm_data, validate=True)
+                if success:
+                    self.logger.info("✅ TTS PCM данные успешно обновлены в медиа-порту.")
+                    # Log playback statistics
+                    stats = media_port.get_stats()
+                    self.logger.info(f"🎤 Длительность воспроизведения: {stats['duration_seconds']:.2f}s")
+                else:
+                    self.logger.error("❌ Не удалось обновить данные воспроизведения")
+                
                 if media_ready_event:
                     media_ready_event.set()
                 
