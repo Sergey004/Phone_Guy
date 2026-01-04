@@ -7,7 +7,6 @@ import logging
 import pjsua2 as pj
 import threading
 import queue
-from Libs.audio import AudioPlaybackPort, AudioCapturePort
 from Libs.wav_converter import ensure_pjsua_compatible
 
 logging.basicConfig(
@@ -38,7 +37,7 @@ class MyAccount(pj.Account):
 
 
 class MyCall(pj.Call):
-    def __init__(self, acc, call_id=pj.PJSUA_INVALID_ID, ep=None, wav_file="output_phone.wav"):
+    def __init__(self, acc, call_id=pj.PJSUA_INVALID_ID, ep=None, wav_file="output.wav"):
         super().__init__(acc, call_id)
         self.playback_port = None
         self.capture_port = None
@@ -75,6 +74,11 @@ class MyCall(pj.Call):
             if mi.type == pj.PJMEDIA_TYPE_AUDIO and mi.status == pj.PJSUA_CALL_MEDIA_ACTIVE:
                 logging.info("Audio active, setting up media")
                 
+                # Check if already set up to prevent duplicate setup
+                if self.playback_port is not None:
+                    logging.info("Playback port already exists, skipping setup")
+                    return
+                
                 try:
                     audio_media = self.getAudioMedia(mi.index)
                     logging.info(f"Got audio media, port ID: {audio_media.getPortId()}")
@@ -83,37 +87,38 @@ class MyCall(pj.Call):
                     compatible_file = ensure_pjsua_compatible(self.wav_file, target_rate=8000)
                     logging.info(f"Using audio file: {compatible_file}")
                     
-                    # Read PCM data from WAV file
-                    import soundfile as sf
-                    data, sr = sf.read(compatible_file, dtype='int16')
-                    if data.ndim > 1:
-                        data = data[:, 0]
-                    pcm_bytes = data.tobytes()
-                    logging.info(f"Loaded PCM data: {len(pcm_bytes)} bytes")
-                    
-                    # Create playback port with AudioPlaybackPort
-                    self.playback_port = AudioPlaybackPort(
-                        pcm_bytes=pcm_bytes,
-                        sample_rate=8000,
-                        logger=logging.getLogger("AudioPlayback")
-                    )
-                    if self.playback_port.register_with_conf(self.ep):
-                        logging.info("Playback port registered successfully")
-                        # Connect for playback
+                    # Use AudioMediaPlayer for playback (standard PJSIP approach)
+                    self.playback_port = pj.AudioMediaPlayer()
+                    try:
+                        self.playback_port.createPlayer(compatible_file, 0)
+                        logging.info("✓ AudioMediaPlayer created successfully")
+                        
+                        # Connect for playback (player -> audio_media)
                         self.playback_port.startTransmit(audio_media)
-                        logging.info("✓ Playback enabled")
-                    else:
-                        logging.error("Failed to register playback port")
+                        logging.info("✓ Playback transmission started")
+                        
+                        # Verify connection
+                        logging.info(f"  Audio media port ID: {audio_media.getPortId()}")
+                        logging.info(f"  Playback media port ID: {self.playback_port.getPortId()}")
+                        
+                        # Calculate audio file duration
+                        import soundfile as sf
+                        data, sr = sf.read(compatible_file)
+                        duration_seconds = len(data) / sr
+                        logging.info(f"  Audio duration: {duration_seconds:.2f} seconds")
+                        
+                        # Start timer to stop playback after file ends
+                        self.timer = threading.Timer(duration_seconds + 0.5, self.check_playback_done)
+                        self.timer.start()
+                    except Exception as e:
+                        logging.error(f"Failed to create AudioMediaPlayer: {e}")
+                        self.playback_port = None
                     
                     # Create recorder for capturing audio
                     self.recorder = pj.AudioMediaRecorder()
                     self.recorder.createRecorder("captured_audio.wav")
                     audio_media.startTransmit(self.recorder)
                     logging.info("✓ Recording enabled")
-                    
-                    # Start timer to check playback completion
-                    self.timer = threading.Timer(0.5, self.check_playback_done)
-                    self.timer.start()
                     
                 except Exception as e:
                     logging.error(f"Error in onCallMediaState: {e}")
@@ -130,13 +135,16 @@ class MyCall(pj.Call):
 
     def check_playback_done(self):
         try:
-            if self.playback_port and self.isActive() and self.playback_port.is_playback_done():
-                logging.info("Playback completed, queuing hangup")
-                self.hangup_queue.put(True)  # Signal hangup
-            else:
-                # Reschedule timer
-                self.timer = threading.Timer(0.5, self.check_playback_done)
-                self.timer.start()
+            # Stop playback and disconnect
+            if self.playback_port:
+                logging.info("Stopping playback...")
+                self.playback_port.stopTransmit()
+                self.playback_port = None
+            
+            # Queue hangup
+            self.timer = None  # Don't reschedule
+            logging.info("Playback timer expired, queuing hangup")
+            self.hangup_queue.put(True)  # Signal hangup
         except Exception as e:
             logging.error(f"Error in check_playback_done: {e}")
             if self.timer:
@@ -152,7 +160,7 @@ class VoIPBot:
         ep_cfg = pj.EpConfig()
         ep_cfg.uaConfig.threadCnt = 1
         ep_cfg.uaConfig.maxCalls = 4
-        ep_cfg.logConfig.level = 5
+        ep_cfg.logConfig.level = 3  # 0=None, 1=Error, 2=Warning, 3=Info, 4=Debug, 5=Trace
         ep_cfg.medConfig.sndClockRate = 8000
         ep_cfg.medConfig.channelCount = 1
         ep_cfg.medConfig.audioFramePtime = 20
@@ -209,10 +217,12 @@ class VoIPBot:
 
         try:
             if self.account:
-                self.account.delete()
+                # Unregister account instead of delete
+                self.account.setRegistration(False)
+                time.sleep(0.5)  # Wait for unregistration
                 self.account = None
         except Exception as e:
-            logging.error(f"Error deleting account: {e}")
+            logging.error(f"Error unregistering account: {e}")
 
         try:
             self.ep.libDestroy()
@@ -229,11 +239,12 @@ if __name__ == "__main__":
     domain, user, passwd = sys.argv[1:4]
     
     import os
-    if not os.path.exists("/home/user/Test_Phone/bot/Test_RTP/output_phone.wav"):
-        logging.error("ERROR: output_phone.wav not found!")
+    wav_file = "/home/user/Test_Phone/bot/Test_RTP/output_phone.wav"
+    if not os.path.exists(wav_file):
+        logging.error(f"ERROR: {wav_file} not found!")
         sys.exit(1)
     
-    logging.info(f"Found output_phone.wav ({os.path.getsize('output_phone.wav')} bytes)")
+    logging.info(f"Found {wav_file} ({os.path.getsize(wav_file)} bytes)")
     logging.info("Audio will be auto-converted to PJSUA2 format if needed")
     
     bot = VoIPBot(domain, user, passwd)

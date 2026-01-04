@@ -245,7 +245,7 @@ class VoIPBot:
         ep_cfg = pj.EpConfig()
         ep_cfg.uaConfig.threadCnt = 1
         ep_cfg.uaConfig.maxCalls = 4
-        ep_cfg.logConfig.level = 5
+        ep_cfg.logConfig.level = 3  # 0=None, 1=Error, 2=Warning, 3=Info, 4=Debug, 5=Trace
         ep_cfg.medConfig.sndClockRate = 8000
         ep_cfg.medConfig.channelCount = 1
         ep_cfg.medConfig.audioFramePtime = 20

@@ -59,24 +59,19 @@ class AudioPlaybackPort(pj.AudioMediaPort):
             
             # Create the audio media port with proper format
             self.createPort("audio_playback_port", audio_format)
+            
+            # Get port ID
             self.conf_port_id = self.getPortId()
             
             if self.conf_port_id < 0:
-                self.logger.error(f"Failed to register port: getPortId returned {self.conf_port_id}")
+                self.logger.error(f"Failed to create port: getPortId returned {self.conf_port_id}")
                 return False
                 
-            self.logger.info(f"AudioPlaybackPort registered with conf port ID: {self.conf_port_id}")
+            self.logger.info(f"AudioPlaybackPort created with port ID: {self.conf_port_id}")
+            self.logger.info(f"Ready for transmission via startTransmit()")
             
-            # Verify the port is functional
-            try:
-                test_frame = pj.MediaFrame()
-                test_frame.buf = []
-                test_frame.size = 0
-                result = self.getFrame(test_frame)
-                if result != pj.PJ_SUCCESS:
-                    self.logger.warning(f"getFrame test returned {result}, but continuing")
-            except Exception as test_e:
-                self.logger.warning(f"Port functionality test failed: {test_e}, but continuing")
+            # Set playback state
+            self.is_playing = True
                 
             return True
             
@@ -97,6 +92,10 @@ class AudioPlaybackPort(pj.AudioMediaPort):
         """
         try:
             with self._lock:
+                # Log first few calls to see if getFrame is being called
+                if self.frames_played < 5:
+                    self.logger.info(f"getFrame called: frame #{self.frames_played + 1}, position={self.position}, data_size={len(self.pcm_data)}")
+                
                 # Check if we have data to play
                 if self.position >= len(self.pcm_data):
                     # Return silence frame when no more data
@@ -109,6 +108,8 @@ class AudioPlaybackPort(pj.AudioMediaPort):
                         frame.type = pj.PJMEDIA_FRAME_TYPE_AUDIO
                         frame.size = self.frame_size
                         frame.buf = [0] * (self.frame_size // 2)
+                        if self.frames_played < 5:
+                            self.logger.warning(f"Playback finished, returning silence (frame #{self.frames_played + 1})")
                         return pj.PJ_SUCCESS
 
                 # Calculate how many bytes to send in this frame
@@ -127,6 +128,7 @@ class AudioPlaybackPort(pj.AudioMediaPort):
                         )
                         pcm_samples.append(sample)
                 
+                frame.type = pj.PJMEDIA_FRAME_TYPE_AUDIO
                 frame.buf = pcm_samples
                 frame.size = len(pcm_samples) * 2  # Size in bytes
                 self.position += bytes_to_send
