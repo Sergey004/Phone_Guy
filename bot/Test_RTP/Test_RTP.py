@@ -7,6 +7,7 @@ import logging
 import pjsua2 as pj
 import threading
 import queue
+from Libs.audio import AudioPlaybackPort, AudioCapturePort
 from Libs.wav_converter import ensure_pjsua_compatible
 
 logging.basicConfig(
