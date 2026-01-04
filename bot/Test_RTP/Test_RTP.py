@@ -4,10 +4,9 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import time
 import logging
-import pjsua2 as pj
+import pjsua as pj # type: ignore
 import threading
 import queue
-from Libs.audio import AudioPlaybackPort, AudioCapturePort
 from Libs.wav_converter import ensure_pjsua_compatible
 
 logging.basicConfig(
@@ -136,10 +135,11 @@ class MyCall(pj.Call):
 
     def check_playback_done(self):
         try:
-            # Stop playback and disconnect
+            # Stop playback by disconnecting - no need to call stopTransmit()
             if self.playback_port:
                 logging.info("Stopping playback...")
-                self.playback_port.stopTransmit()
+                # Simply disconnect the player from audio media
+                # This will stop the playback
                 self.playback_port = None
             
             # Queue hangup
