@@ -1,7 +1,6 @@
 """
 Audio Playback Port
 Safe audio playback with format validation and error handling.
-Refactored from ByteStreamMediaPort with improved stability.
 """
 
 import pjsua2 as pj
@@ -14,7 +13,6 @@ from .audio_format_handler import AudioFormatHandler
 class AudioPlaybackPort(pj.AudioMediaPort):
     """
     Safe audio playback port that handles PCM-16 audio with proper error handling.
-    Replaces ByteStreamMediaPort with improved stability and format validation.
     """
     
     def __init__(self, 

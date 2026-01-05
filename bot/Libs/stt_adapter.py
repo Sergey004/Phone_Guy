@@ -20,7 +20,7 @@ class STTAdapter:
     def __init__(self, config: dict, logger: logging.Logger, media_port=None):
         self.config = config
         self.logger = logger.getChild('STT')
-        self.media_port = media_port  # Reference to ByteStreamMediaPort
+        self.media_port = media_port  # Reference to AudioCapturePort
         stt_cfg = config.get('stt', {})
         self.energy_threshold = int(stt_cfg.get('energy_threshold', 500))
         self.min_chunk_ms = int(stt_cfg.get('min_chunk_ms', 1500))
