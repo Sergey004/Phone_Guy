@@ -26,24 +26,94 @@ logging.basicConfig(
 class MainAccount(VoIPAccount):
     """Main account with STT/TTS support."""
     
-    def __init__(self, ep, stt_adapter, tts_adapter, loop, logger=None, **kwargs):
+    def __init__(self, ep, stt_adapter, tts_adapter, loop, config=None, logger=None, **kwargs):
         super().__init__(ep, call_class=MainCall, logger=logger, **kwargs)
         self.stt_adapter = stt_adapter
         self.tts_adapter = tts_adapter
         self.loop = loop
+        self.config = config or {}
+        
+        # Get settings from config
+        server_cfg = self.config.get('server', {})
+        self.answer_delay = server_cfg.get('answerDelay', 2.0)
+        self.silence_duration = server_cfg.get('silenceDuration', 2.0)
+        
+        self.logger.info(f"MainAccount initialized with answer_delay={self.answer_delay}s, silence_duration={self.silence_duration}s")
+    
+    def onIncomingCall(self, prm):
+        """
+        Called when incoming call is received.
+        Implements delay to simulate real human answering.
+        """
+        try:
+            if not self.call_class:
+                self.logger.warning("No call class set, ignoring incoming call")
+                return
+            
+            # Create call instance with silence duration
+            call = self.call_class(
+                self, 
+                prm.callId, 
+                stt_adapter=self.stt_adapter,
+                tts_adapter=self.tts_adapter,
+                loop=self.loop,
+                silence_duration=self.silence_duration,
+                **self.call_kwargs
+            )
+            self.current_call = call
+            
+            ci = call.getInfo()
+            self.logger.info(f"Incoming call from {ci.remoteUri}")
+            
+            # Call custom handler if set
+            if self.incoming_call_handler:
+                self.incoming_call_handler(call, prm)
+            else:
+                # Default behavior: answer with delay to simulate human
+                if self.answer_delay > 0 and self.loop:
+                    # Schedule delayed answer using asyncio
+                    asyncio.run_coroutine_threadsafe(
+                        self._delayed_answer(call), 
+                        self.loop
+                    )
+                else:
+                    # Answer immediately
+                    self._answer_call(call, prm)
+                
+        except Exception as e:
+            self.logger.error(f"Error handling incoming call: {e}", exc_info=True)
+    
+    async def _delayed_answer(self, call):
+        """
+        Delayed answer using asyncio to simulate human answering.
+        """
+        try:
+            self.logger.info(f"Waiting {self.answer_delay} seconds before answering...")
+            await asyncio.sleep(self.answer_delay)
+            
+            # Answer the call
+            answer_prm = pj.CallOpParam()
+            answer_prm.statusCode = 200
+            call.answer(answer_prm)
+            self.logger.info("Call answered")
+            
+        except Exception as e:
+            self.logger.error(f"Error in delayed answer: {e}", exc_info=True)
 
 
 class MainCall(VoIPCall):
     """Main call with STT/TTS processing."""
     
     def __init__(self, acc, call_id=pj.PJSUA_INVALID_ID, 
-                 stt_adapter=None, tts_adapter=None, loop=None, **kwargs):
+                 stt_adapter=None, tts_adapter=None, loop=None, 
+                 silence_duration=2.0, **kwargs):
         super().__init__(acc, call_id, **kwargs)
         self.playback_port = None
         self.capture_port = None
         self.stt_adapter = stt_adapter
         self.tts_adapter = tts_adapter
         self.loop = loop
+        self.silence_duration = silence_duration
         self.text_queue = queue.Queue()
         self._capture_task = None
         self._stop_capture = False
@@ -56,6 +126,13 @@ class MainCall(VoIPCall):
             
             if ci.state == pj.PJSIP_INV_STATE_CONFIRMED:
                 self.logger.info("Call is confirmed. Starting STT/TTS processing.")
+                
+                # Initialize playback port with silence
+                if self.playback_port:
+                    silence = self.playback_port.generate_silence(self.silence_duration)
+                    self.playback_port.update_playback_data(silence, validate=False)
+                    self.logger.info(f"Playback port initialized with {self.silence_duration}s of silence")
+                
                 if self.loop:
                     self.loop.create_task(self.process_stt_tts_loop())
                     self.loop.create_task(self.process_audio_capture())
@@ -201,7 +278,8 @@ def main():
         MainAccount, 
         stt_adapter=stt_adapter, 
         tts_adapter=tts_adapter, 
-        loop=loop
+        loop=loop,
+        config=config
     ):
         logging.error("Failed to create account")
         sys.exit(1)

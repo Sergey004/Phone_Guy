@@ -248,3 +248,23 @@ class AudioPlaybackPort(pj.AudioMediaPort):
                 'duration_seconds': self.get_duration(),
                 'progress': self.get_playback_position() / self.get_duration() if self.get_duration() > 0 else 0.0
             }
+    
+    def generate_silence(self, duration_seconds: float) -> bytes:
+        """
+        Generate PCM-16 silence for initialization.
+        
+        Args:
+            duration_seconds: Duration of silence in seconds
+            
+        Returns:
+            PCM-16 bytes representing silence
+        """
+        try:
+            num_samples = int(self.sample_rate * duration_seconds)
+            # Each sample is 2 bytes (16-bit)
+            silence = bytes(num_samples * 2)
+            self.logger.info(f"Generated {duration_seconds}s of silence: {len(silence)} bytes")
+            return silence
+        except Exception as e:
+            self.logger.error(f"Error generating silence: {e}", exc_info=True)
+            return b""

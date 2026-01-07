@@ -5,6 +5,9 @@ soundfile
 scipy
 torchcrepe
 faiss-cpu
-parselmouth
+praat-parselmouth>=0.4.2
 onnxruntime
 pyworld
+git+https://github.com/One-sixth/fairseq.git
+tensorboardX
+faiss-cpu==1.7.4

@@ -12,5 +12,5 @@ scipy
 chatterbox-tts
 torch
 torchaudio
-chatterbox-tts
 faster-whisper
+dotenv

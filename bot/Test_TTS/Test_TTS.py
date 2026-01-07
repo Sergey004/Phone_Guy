@@ -1,40 +1,45 @@
 #!/usr/bin/env python3
 """
 Test VoIP call with TTS
-Uses new VoIP library for SIP functionality
+Uses threading for TTS generation (no asyncio) - similar to Test_Delay_Silence.py
 """
 
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import time
-import asyncio
 import logging
+import threading
 import pjsua2 as pj
 from Libs.tts_adapter import TTSAdapter
 from Libs.llm_adapter import phoneguy_reply, reset_conversation_history
-from Libs.audio import AudioPlaybackPort
 from Libs.voip import VoIPClient, VoIPAccount, VoIPCall
+from Libs.wav_converter import ensure_pjsua_compatible
 import wave
+
 
 logging.basicConfig(
     level=logging.DEBUG,
     format="[%(asctime)s] %(levelname)-8s %(message)s",
     datefmt="%H:%M:%S"
 )
-
+logging.getLogger('numba').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
 calls = []  # Global list to keep strong references to call objects
 
 
 class TTSCall(VoIPCall):
-    """TTS call implementation with voice generation."""
+    """TTS call implementation with voice generation using threading."""
     
     def __init__(self, acc, call_id=pj.PJSUA_INVALID_ID, 
-                 tts_adapter=None, loop=None, **kwargs):
+                 tts_adapter=None, silence_duration=2.0, **kwargs):
         super().__init__(acc, call_id, **kwargs)
         self.tts_adapter = tts_adapter
-        self.loop = loop
-        self.media_ready = asyncio.Event()
+        self.silence_duration = silence_duration
+        self.media_ready = threading.Event()  # threading.Event, not asyncio.Event!
+        self.tts_wav_file = None  # Store path to generated WAV file
+        self.greeting_text = None  # Store greeting text
+        self.logger.info(f"TTSCall initialized with silence_duration={silence_duration}s")
 
     def onCallState(self, prm):
         """Handle call state changes."""
@@ -43,9 +48,14 @@ class TTSCall(VoIPCall):
             self.logger.info(f"Call state: {ci.stateText}")
             
             if ci.state == pj.PJSIP_INV_STATE_CONFIRMED:
-                self.logger.info("Call CONFIRMED! Setting up media...")
-                self.media_ready.set()
-                self.logger.info("Media ready event set")
+                self.logger.info("Call CONFIRMED! Waiting for TTS...")
+                # Wait for TTS to be ready
+                if self.media_ready.wait(timeout=30):
+                    self.logger.info("TTS is ready! Playing audio...")
+                    self._play_tts_audio()
+                else:
+                    self.logger.warning("Timeout waiting for TTS")
+                    
             elif ci.state == pj.PJSIP_INV_STATE_DISCONNECTED:
                 self.logger.info("Call disconnected")
                 self.media_ready.clear()
@@ -54,240 +64,206 @@ class TTSCall(VoIPCall):
             super().onCallState(prm)
             
         except Exception as e:
-            self.logger.error(f"Error in onCallState: {e}")
-
-    def onCallMediaState(self, prm):
-        """Handle media state changes."""
+            self.logger.error(f"Error in onCallState: {e}", exc_info=True)
+    
+    def _play_tts_audio(self):
+        """Play the generated TTS audio file."""
         try:
-            self.logger.info("ENTERING onCallMediaState")
-            ci = self.getInfo()
-            self.logger.info(f"Media state info: media count={len(ci.media)}")
-            
-            if not ci.media:
-                self.logger.warning("No media found in call info")
+            if not self.tts_wav_file:
+                self.logger.error("No TTS WAV file available")
                 return
             
-            for i, mi in enumerate(ci.media):
-                self.logger.info(f"Media {i}: type={mi.type}, status={mi.status}")
+            # Get audio media (try first active media)
+            try:
+                audio_media = self.getAudioMedia(0)
+            except Exception:
+                # Fallback: try to get any media
+                ci = self.getInfo()
+                if not ci.media:
+                    self.logger.error("No media found")
+                    return
                 
-                if mi.type == pj.PJMEDIA_TYPE_AUDIO and mi.status == pj.PJSUA_CALL_MEDIA_ACTIVE:
-                    self.logger.info("Audio media is ACTIVE - signaling media ready!")
-                    self.media_ready.set()
-                    break
+                for mi in ci.media:
+                    if mi.type == pj.PJMEDIA_TYPE_AUDIO and mi.status == pj.PJSUA_CALL_MEDIA_ACTIVE:
+                        audio_media = self.getAudioMedia(mi.index)
+                        break
+                else:
+                    self.logger.error("No active audio media found")
+                    return
             
-            self.logger.info("EXITING onCallMediaState")
+            # Ensure WAV is compatible with PJSIP
+            compatible_file = ensure_pjsua_compatible(self.tts_wav_file, target_rate=8000)
+            self.logger.info(f"Playing TTS audio: {compatible_file}")
+            
+            # Play audio file using VoIPCall method
+            if self.play_audio_file(compatible_file, audio_media):
+                # Calculate audio duration
+                import soundfile as sf
+                try:
+                    data, sr = sf.read(compatible_file)
+                    duration_seconds = len(data) / sr
+                    self.logger.info(f"Audio duration: {duration_seconds:.2f} seconds")
+                    
+                    # Schedule hangup after playback
+                    self.schedule_hangup(duration_seconds + 0.5)
+                except Exception as e:
+                    self.logger.error(f"Error calculating duration: {e}")
             
         except Exception as e:
-            self.logger.error(f"Error in onCallMediaState: {e}")
+            self.logger.error(f"Error playing TTS audio: {e}", exc_info=True)
 
 
 class TTSAccount(VoIPAccount):
-    """TTS account implementation."""
+    """TTS account implementation using threading (no asyncio)."""
     
-    def __init__(self, ep, tts_adapter, loop, logger=None, **kwargs):
+    def __init__(self, ep, tts_adapter, config=None, logger=None, **kwargs):
+        # Pass tts_adapter and silence_duration to call class
+        kwargs['tts_adapter'] = tts_adapter
+        server_cfg = (config or {}).get('server', {})
+        kwargs['silence_duration'] = server_cfg.get('silenceDuration', 2.0)
+        
         super().__init__(ep, call_class=TTSCall, logger=logger, **kwargs)
         self.tts_adapter = tts_adapter
-        self.loop = loop
-        self.pre_generated_samples = {}
-
+        self.config = config or {}
+        
+        # Get settings from config
+        self.answer_delay = server_cfg.get('answerDelay', 2.0)
+        self.silence_duration = server_cfg.get('silenceDuration', 2.0)
+        
+        self.logger.info(f"TTSAccount: answer_delay={self.answer_delay}s, silence_duration={self.silence_duration}s")
+    
     def onIncomingCall(self, prm):
-        """Handle incoming call."""
+        """
+        Called when incoming call is received.
+        Answers immediately and starts TTS generation in background thread.
+        """
         try:
-            call = TTSCall(self, prm.callId, tts_adapter=self.tts_adapter, loop=self.loop)
-            calls.append(call)
+            if not self.call_class:
+                self.logger.warning("No call class set, ignoring incoming call")
+                return
+            
+            # Create call instance
+            call = self.call_class(
+                self, 
+                prm.callId, 
+                **self.call_kwargs
+            )
             self.current_call = call
             
             ci = call.getInfo()
-            self.logger.info(f"INCOMING CALL from {ci.remoteUri}")
+            self.logger.info(f"Incoming call from {ci.remoteUri}")
             
-            # Answer immediately
-            self.logger.info("Answering call...")
+            # Answer the call immediately
+            self.logger.info("Answering call immediately...")
             answer_prm = pj.CallOpParam()
             answer_prm.statusCode = 200
             call.answer(answer_prm)
-            self.logger.info("Call answered")
+            self.logger.info("Call answered immediately")
             
-            # Start voice generation
-            self.loop.create_task(self.handle_call_after_answer(call))
+            # Start TTS generation in background thread
+            self.logger.info("Starting TTS generation in background thread...")
+            thread = threading.Thread(
+                target=self._generate_tts_background,
+                args=(call,),
+                daemon=True
+            )
+            thread.start()
+            self.logger.info(f"TTS generation thread started: {thread.name}")
             
         except Exception as e:
-            self.logger.error(f"Error handling incoming call: {e}")
-
-    async def handle_call_after_answer(self, call):
-        """Handle call after answer."""
+            self.logger.error(f"Error handling incoming call: {e}", exc_info=True)
+    
+    def _generate_tts_background(self, call):
+        """Generate TTS in background thread (synchronous, no asyncio)."""
         try:
-            # Check TTS readiness
-            tts_ready = await self.tts_adapter.check_health()
+            self.logger.info("=" * 50)
+            self.logger.info("ENTERING TTS generation (background thread)")
+            self.logger.info("=" * 50)
+            
+            # Check TTS readiness (synchronous)
+            self.logger.info("Checking TTS health...")
+            tts_ready = self.tts_adapter.check_health_sync()
+            self.logger.info(f"TTS health check result: {tts_ready}")
+            
             if not tts_ready:
-                self.logger.warning("TTS server unavailable, using pre-generated samples")
-                await self.use_pre_generated_voice(call)
+                self.logger.warning("TTS server unavailable")
                 return
 
-            # Generate greeting text
+            # Generate greeting text (synchronous)
             self.logger.info("Generating greeting text...")
-            greeting_prompt = "A person is calling you. Please greet them warmly and introduce yourself as an AI assistant. Ask how you can help them today."
+            greeting_prompt = "Someone is calling you (literally). Greet them warmly and introduce yourself. Introduce yourself and ask them what they need from you in a polite manner."
             greeting_text = phoneguy_reply(greeting_prompt)
             self.logger.info(f"Generated text: '{greeting_text}'")
 
-            # Create media port for TTS
-            media_port = AudioPlaybackPort(sample_rate=8000, logger=self.logger.getChild("AudioPlayback"))
-            if not media_port.register_with_conf(self.getAccount().ep):
-                self.logger.error("Failed to create media port")
-                await self.use_pre_generated_voice(call)
-                return
-
-            self.logger.info(f"Media port created: ID={media_port.conf_port_id}")
-
-            # Generate and play voice
-            self.logger.info("Generating voice...")
-            try:
-                await self.tts_adapter.speak(greeting_text, media_port)
-                self.logger.info("Voice generated and playing")
-                self.logger.info("Waiting for media stream...")
-                try:
-                    await asyncio.wait_for(call.media_ready.wait(), timeout=10)
-                    self.logger.info("Media stream ready!")
-                except asyncio.TimeoutError:
-                    self.logger.error("Timeout waiting for media stream")
-                    return
-            except Exception as e:
-                self.logger.error(f"Error generating voice: {e}")
-                await self.use_pre_generated_voice(call)
-                return
-
-            # Connect media port to audio stream
-            try:
-                try:
-                    audio_media = call.getAudioMedia(0)
-                except Exception:
-                    audio_media = call.getMedia(0)
-                media_port.startTransmit(audio_media)
-                self.logger.info("Media port connected to audio stream")
-            except Exception as e:
-                self.logger.error(f"Error connecting media port: {e}")
-                # Fallback
-                try:
-                    pcm = await self.tts_adapter.synthesize(greeting_text)
-                    if pcm:
-                        temp_wav = "temp_tts_fallback.wav"
-                        with wave.open(temp_wav, "wb") as wf:
-                            wf.setnchannels(1)
-                            wf.setsampwidth(2)
-                            wf.setframerate(8000)
-                            wf.writeframes(pcm)
-                        player = pj.AudioMediaPlayer()
-                        player.createPlayer(temp_wav, 0)
-                        player.startTransmit(audio_media)
-                        self.logger.info("Fallback AudioMediaPlayer started")
-                except Exception as pe:
-                    self.logger.error(f"Fallback playback failed: {pe}")
-                    await self.use_pre_generated_voice(call)
+            # Generate TTS audio (synchronous)
+            self.logger.info("Generating TTS voice...")
+            import time
+            start_time = time.time()
+            
+            # Use synchronous synthesize method
+            pcm_data = self.tts_adapter.synthesize_sync(greeting_text)
+            
+            generation_time = time.time() - start_time
+            self.logger.info(f"TTS generated in {generation_time:.2f} seconds")
+            
+            if not pcm_data:
+                self.logger.error("Failed to generate TTS audio")
                 return
             
-            # Wait for playback to finish
-            greeting_duration = len(greeting_text.split()) * 0.5 + 2
-            self.logger.info(f"Waiting {greeting_duration:.1f} seconds for greeting...")
-            await asyncio.sleep(greeting_duration)
-
-            # Hang up after greeting
-            if call.isActive():
-                self.logger.info("Hanging up after greeting...")
-                prm = pj.CallOpParam()
-                prm.statusCode = pj.PJSIP_SC_OK
-                call.hangup(prm)
-                self.logger.info("Call completed")
-                
+            self.logger.info(f"TTS ready: {len(pcm_data)} bytes")
+            
+            # Save PCM to temporary WAV file
+            temp_wav = "temp_tts_playback.wav"
+            with wave.open(temp_wav, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(8000)
+                wf.writeframes(pcm_data)
+            
+            self.logger.info(f"Saved TTS to {temp_wav}")
+            
+            # Store WAV file path and set event
+            call.tts_wav_file = temp_wav
+            call.greeting_text = greeting_text
+            call.media_ready.set()
+            self.logger.info("TTS generation completed! Media ready event set.")
+            
         except Exception as e:
-            self.logger.error(f"Error handling call: {e}")
-            if call.isActive():
-                prm = pj.CallOpParam()
-                prm.statusCode = pj.PJSIP_SC_INTERNAL_SERVER_ERROR
-                call.hangup(prm)
-
-    async def use_pre_generated_voice(self, call):
-        """Use pre-generated voice as fallback."""
-        try:
-            self.logger.info("Using pre-generated voice...")
-            
-            if not self.pre_generated_samples:
-                self.logger.error("No pre-generated samples available!")
-                return
-            
-            # Select best sample
-            best_sample = None
-            if 'main_greeting' in self.pre_generated_samples:
-                best_sample = self.pre_generated_samples['main_greeting']
-                self.logger.info("Using main pre-generated greeting")
-            else:
-                best_sample = max(self.pre_generated_samples.values(), key=lambda x: x.get('length', 0))
-                self.logger.info(f"Using pre-generated sample: {best_sample.get('length', 0)} bytes")
-            
-            if not best_sample or not best_sample.get('pcm_data'):
-                self.logger.error("Selected sample is empty or corrupted")
-                return
-            
-            # Create media port
-            media_port = AudioPlaybackPort(sample_rate=8000, logger=self.logger.getChild("AudioPlayback"))
-            if not media_port.register_with_conf(self.getAccount().ep):
-                self.logger.error("Failed to create media port for pre-generated voice")
-                return
-            
-            # Load PCM data
-            media_port.update_playback_data(best_sample['pcm_data'])
-            self.logger.info(f"PCM data loaded: {len(best_sample['pcm_data'])} bytes")
-            
-            # Connect to audio stream
-            try:
-                audio_media = call.getAudioMedia(-1)
-                media_port.startTransmit(audio_media)
-                self.logger.info("Media port connected to audio stream")
-                
-                # Wait for playback
-                greeting_duration = len(best_sample['text'].split()) * 0.5 + 2
-                self.logger.info(f"Waiting {greeting_duration:.1f} seconds for greeting...")
-                await asyncio.sleep(greeting_duration)
-                
-            except Exception as e:
-                self.logger.error(f"Error connecting media port: {e}")
-                return
-                
-        except Exception as e:
-            self.logger.error(f"Error using pre-generated voice: {e}")
+            self.logger.error(f"Error generating TTS: {e}", exc_info=True)
 
 
 def main():
     """Main entry point."""
     if "--tts-only" in sys.argv:
-        async def tts_only():
-            config = {
-                "tts": {
-                    "engine": "turbo",
-                    "device": "cpu",
-                    "audio_prompt_path": "voices/PhoneGuy_FNAF1_01.wav",
-                    "rvc_enabled": True,
-                    "rvc_model_path": "models/RVC/PhoneGuyFNAF1/PhoneGuyFNAF1_e1000_s22000.pth",
-                    "rvc_index_path": "models/RVC/PhoneGuyFNAF1/added_IVF339_Flat_nprobe_1_PhoneGuyFNAF1_v2.index",
-                    "rvc_index_rate": 0.5,
-                    "rvc_f0_method": "rmvpe"
-                }
+        # Test TTS only (synchronous, no threading)
+        config = {
+            "tts": {
+                "engine": "turbo",
+                "device": "cuda",
+                "audio_prompt_path": "voices/PhoneGuy_FNAF1_01.wav",
+                "rvc_enabled": True,
+                "rvc_model_path": "models/RVC/PhoneGuyFNAF1/PhoneGuyFNAF1_e1000_s22000.pth",
+                "rvc_index_path": "models/RVC/PhoneGuyFNAF1/added_IVF339_Flat_nprobe_1_PhoneGuyFNAF1_v2.index",
+                "rvc_index_rate": 0.5,
+                "rvc_f0_method": "rmvpe"
             }
-            tts = TTSAdapter(config, logging.getLogger("TTS"))
-            ok = await tts.check_health()
-            if not ok:
-                logging.error("TTS health check failed")
-                return
-            text = "Hello, this is a test of the voice."
-            pcm = await tts.synthesize(text)
-            if not pcm:
-                logging.error("No PCM data generated")
-                return
-            with wave.open("output.wav", "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(8000)
-                wf.writeframes(pcm)
-            logging.info("Wrote output.wav")
-        asyncio.run(tts_only())
+        }
+        tts = TTSAdapter(config, logging.getLogger("TTS"))
+        ok = tts.check_health_sync()
+        if not ok:
+            logging.error("TTS health check failed")
+            return
+        text = "Hello, this is a test of the voice."
+        pcm = tts.synthesize_sync(text)
+        if not pcm:
+            logging.error("No PCM data generated")
+            return
+        with wave.open("output.wav", "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(8000)
+            wf.writeframes(pcm)
+        logging.info("Wrote output.wav")
         sys.exit(0)
     
     if len(sys.argv) < 4:
@@ -295,9 +271,6 @@ def main():
         sys.exit(1)
 
     domain, user, passwd = sys.argv[1:4]
-    
-    # Create asyncio event loop
-    loop = asyncio.get_event_loop()
     
     # Create VoIP client
     config = {
@@ -308,9 +281,13 @@ def main():
             'local_addr': '192.168.1.181',
             'local_port': 5060
         },
+        'server': {
+            'answerDelay': 0.0,      # Answer immediately
+            'silenceDuration': 2.0   # 2 seconds of silence
+        },
         'tts': {
             'engine': 'turbo',
-            'device': 'cpu',
+            'device': 'cuda',
             'audio_prompt_path': '/home/user/Test_Phone/voices/PhoneGuy_FNAF1_01.wav',
             'rvc_enabled': True,
             'rvc_model_path': '/home/user/Test_Phone/models/RVC/PhoneGuyFNAF1/PhoneGuyFNAF1_e1000_s22000.pth',
@@ -334,32 +311,43 @@ def main():
 
     # Initialize TTS
     tts_adapter = TTSAdapter(config, logging.getLogger("TTS"))
-    if not loop.run_until_complete(tts_adapter.check_health()):
-        logging.error("TTS server unavailable. Calls may proceed without audio.")
+    ready = tts_adapter.check_health_sync()
+    if not ready:
+        logging.warning("TTS engine not ready; audio responses may be skipped.")
 
     # Create account
-    if not bot.create_account(TTSAccount, tts_adapter=tts_adapter, loop=loop):
+    if not bot.create_account(TTSAccount, tts_adapter=tts_adapter, config=config):
         logging.error("Failed to create account")
         sys.exit(1)
 
     # Make outgoing call if specified
     if len(sys.argv) > 4:
         target = sys.argv[4]
-        call = bot.make_call(TTSCall, target, tts_adapter=tts_adapter, loop=loop)
+        call = bot.make_call(TTSCall, target, tts_adapter=tts_adapter)
         if call:
             calls.append(call)
             logging.info(f"Call initiated to {target}")
 
     logging.info("Ready. Waiting for calls (LLM+TTS test on incoming)...")
+    logging.info("When call comes:")
+    logging.info("  1. Will answer immediately")
+    logging.info("  2. Will generate TTS in background thread")
+    logging.info("  3. Will play TTS when ready")
     
     try:
-        loop.run_forever()
+        while True:
+            time.sleep(0.1)
+            
+            # Process hangup queue for current call
+            account = bot.get_account()
+            if account:
+                call = account.get_current_call()
+                if call:
+                    call.process_hangup_queue()
+                    
     except KeyboardInterrupt:
         logging.info("\nShutting down...")
         try:
-            loop.run_until_complete(loop.shutdown_asyncgens())
-            loop.close()
-            
             # Hang up all calls
             for call in calls[:]:
                 if call.isActive():
@@ -369,12 +357,6 @@ def main():
                     except Exception as e:
                         logging.error(f"Error hanging up call: {e}")
             calls.clear()
-            
-            # Cleanup account
-            account = bot.get_account()
-            if account and hasattr(account, 'pre_generated_samples'):
-                logging.info(f"Cleaning up {len(account.pre_generated_samples)} pre-generated samples")
-                account.pre_generated_samples.clear()
             
             bot.destroy()
             reset_conversation_history()

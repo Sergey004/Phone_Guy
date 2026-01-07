@@ -24,6 +24,9 @@ from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 from chatterbox.tts_turbo import ChatterboxTurboTTS
 from .audio import AudioPlaybackPort
 logging.getLogger('numba').setLevel(logging.WARNING)
+numba_logger = logging.getLogger('numba')
+numba_logger.setLevel(logging.WARNING)
+numba_logger.propagate = False
 
 
 logging.basicConfig(
@@ -191,3 +194,89 @@ class TTSAdapter:
                 self.logger.error(f"🎤 Ошибка TTS speak: {e}", exc_info=True)
                 self.logger.error(f"🎤 Тип ошибки: {type(e).__name__}")
                 self.logger.error(f"🎤 Детали ошибки: {str(e)}")
+
+    def check_health_sync(self, retries: int = 3, backoff: float = 1.0) -> bool:
+        """Synchronous version of check_health for threading (no asyncio)."""
+        for attempt in range(1, retries + 1):
+            try:
+                model = self._get_model()
+                if model is not None:
+                    self.logger.info("TTS engine ready")
+                    return True
+            except Exception as e:
+                self.logger.error(f"TTS health check failed (attempt {attempt}/{retries}): {e}")
+                if attempt < retries:
+                    import time
+                    time.sleep(backoff * attempt)
+        self.logger.error("All TTS health check attempts failed.")
+        return False
+
+    def synthesize_sync(self, text: str, voice: str = None, retries: int = 3) -> bytes:
+        """Synchronous version of synthesize for threading (no asyncio)."""
+        for attempt in range(1, retries + 1):
+            self.logger.info(f"🎤 Начинаем синтез текста: '{text[:50]}...' ({attempt}/{retries})")
+            try:
+                model = self._get_model()
+                if isinstance(model, ChatterboxMultilingualTTS) and self.language_id:
+                    wav = model.generate(text, language_id=self.language_id, audio_prompt_path=self.audio_prompt_path)
+                else:
+                    wav = model.generate(text, audio_prompt_path=self.audio_prompt_path)
+                sr = getattr(model, 'sr', 16000)
+                if isinstance(wav, torch.Tensor):
+                    wave = wav.detach().cpu().numpy()
+                else:
+                    wave = np.array(wav)
+                
+                # Apply RVC if enabled
+                if self.rvc_enabled and self.rvc_model_path:
+                     self.logger.info(f"🔄 Применяем RVC обработку: {self.rvc_model_path}")
+                     try:
+                         # Ensure waveform is 1D float32 for RVC/RMVPE
+                         wave_np = np.asarray(wave)
+                         if wave_np.ndim > 1:
+                             wave_np = np.squeeze(wave_np)
+                         if wave_np.ndim != 1:
+                             wave_np = wave_np.reshape(-1)
+                         wave_np = wave_np.astype(np.float32, copy=False)
+                         wave, sr = rvc_infer(
+                             wave_np,
+                             sr,
+                             self.rvc_model_path,
+                             device=self.device,
+                             index_path=self.rvc_index_path,
+                             index_rate=self.rvc_index_rate,
+                             pitch_shift=self.rvc_pitch_shift,
+                             f0_method=self.rvc_f0_method
+                         )
+                     except Exception as e:
+                         self.logger.error(f"⚠️ Ошибка RVC обработки: {e}", exc_info=True)
+                         # Fallback to original audio if RVC fails
+                
+                # Convert back to torch tensor for resampling
+                wave = torch.tensor(wave).float()
+
+                if wave.dim() == 2 and wave.size(0) > 1:
+                    wave = torch.mean(wave, dim=0, keepdim=True)
+                elif wave.dim() == 1:
+                    wave = wave.unsqueeze(0)
+                if sr != self.sample_rate:
+                    wave = torchaudio.functional.resample(wave, sr, self.sample_rate)
+                wave = wave.squeeze(0)
+                wave = torch.clamp(wave, -1.0, 1.0)
+                int16 = (wave.numpy() * 32767.0).astype(np.int16)
+                pcm = int16.tobytes()
+                if len(pcm) == 0:
+                    if attempt < retries:
+                        import time
+                        time.sleep(1.0 * attempt)
+                        continue
+                    return b''
+                self.logger.info(f"✅ Синтез успешно завершен: {len(pcm)} байт PCM данных")
+                return pcm
+            except Exception as e:
+                self.logger.error(f"🎤 Ошибка синтеза на попытке {attempt}/{retries}: {e}", exc_info=True)
+                if attempt < retries:
+                    import time
+                    time.sleep(1.0 * attempt)
+                    continue
+                return b''

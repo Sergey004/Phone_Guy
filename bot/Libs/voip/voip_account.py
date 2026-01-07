@@ -38,6 +38,8 @@ class VoIPAccount(pj.Account):
         
         self.current_call = None
         self.incoming_call_handler = None
+        self._pending_call = None  # Store call for delayed answering
+        self._answer_timer = None  # PJSIP timer for delayed answer
     
     def onRegState(self, prm):
         """
@@ -82,19 +84,30 @@ class VoIPAccount(pj.Account):
         except Exception as e:
             self.logger.error(f"Error handling incoming call: {e}", exc_info=True)
     
-    def _answer_call(self, call: 'VoIPCall', prm):
+    def _answer_call(self, call: 'VoIPCall', prm, delay_seconds: float = 0.0):
         """
         Answer incoming call with default behavior.
         
         Args:
             call: VoIP call instance
             prm: Incoming call parameter
+            delay_seconds: Delay before answering (in seconds)
         """
         try:
-            answer_prm = pj.CallOpParam()
-            answer_prm.statusCode = 200
-            call.answer(answer_prm)
-            self.logger.info("Call answered")
+            if delay_seconds > 0:
+                self.logger.info(f"Delaying answer by {delay_seconds} seconds")
+                # Store call and delay for later processing
+                # The delay should be handled by the call's own logic
+                # We'll answer immediately but the call will handle the delay
+                answer_prm = pj.CallOpParam()
+                answer_prm.statusCode = 200
+                call.answer(answer_prm)
+                self.logger.info("Call answered (delay will be handled by call logic)")
+            else:
+                answer_prm = pj.CallOpParam()
+                answer_prm.statusCode = 200
+                call.answer(answer_prm)
+                self.logger.info("Call answered")
         except Exception as e:
             self.logger.error(f"Error answering call: {e}")
     
