@@ -1,5 +1,69 @@
 """Python wrapper for the PcmMedia C++ extension module"""
 
+import os
+import sys
+import ctypes
+
+# Ensure this directory is in sys.path so we can import pcm_media.so
+_native_dir = os.path.dirname(os.path.abspath(__file__))
+if _native_dir not in sys.path:
+    sys.path.insert(0, _native_dir)
+
+# Setup library paths for PJSUA2 dependencies
+def _preload_libraries():
+    """Preload PJSUA2 libraries before importing the extension"""
+    # Try multiple ways to find the library directory
+    import os
+    
+    # Method 1: Relative to this file
+    native_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(native_dir)
+    
+    # Method 2: If native_dir doesn't look right, try relative to current working directory
+    if not os.path.exists(os.path.join(native_dir, "pcm_media.cpython-311-x86_64-linux-gnu.so")):
+        # Try to find from working directory
+        alt_native = os.path.join(os.getcwd(), "native")
+        if os.path.exists(os.path.join(alt_native, "pcm_media.cpython-311-x86_64-linux-gnu.so")):
+            native_dir = alt_native
+            parent_dir = os.path.dirname(native_dir)
+    
+    # Library search paths
+    lib_paths = [
+        os.path.join(parent_dir, "pjproject", "pjlib", "lib"),
+        os.path.join(parent_dir, "pjproject", "pjmedia", "lib"),
+        os.path.join(parent_dir, "pjproject", "pjsip", "lib"),
+        os.path.join(parent_dir, "pjproject", "pjnath", "lib"),
+        os.path.join(parent_dir, "pjproject", "pjlib-util", "lib"),
+    ]
+    
+    # Libraries to preload in order
+    libraries_to_load = [
+        ("libpj.so.2", "pjlib"),
+        ("libpjlib-util.so.2", "pjlib-util"),
+        ("libpjnath.so.2", "pjnath"),
+        ("libpjmedia.so.2", "pjmedia"),
+        ("libpjmedia-codec.so.2", "pjmedia-codec"),
+        ("libpjmedia-audiodev.so.2", "pjmedia-audiodev"),
+        ("libpjsua.so.2", "pjsua"),
+        ("libpjsua2.so.2", "pjsua2"),
+    ]
+    
+    for lib_name, lib_label in libraries_to_load:
+        for lib_path in lib_paths:
+            full_path = os.path.join(lib_path, lib_name)
+            if os.path.exists(full_path):
+                try:
+                    ctypes.CDLL(full_path, mode=ctypes.RTLD_GLOBAL)
+                    # Successfully loaded
+                except Exception as e:
+                    # Silently continue if library loading fails
+                    pass
+                break
+
+# Preload libraries
+_preload_libraries()
+
+# Now import the compiled module
 import pcm_media as _pcm_media
 
 
