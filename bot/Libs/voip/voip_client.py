@@ -67,6 +67,7 @@ class VoIPClient:
             ep_cfg = pj.EpConfig()
             ep_cfg.uaConfig.threadCnt = 1
             ep_cfg.uaConfig.maxCalls = 4
+            ep_cfg.uaConfig.mainThreadOnly = True
             ep_cfg.logConfig.level = 3  # Info level
             ep_cfg.medConfig.sndClockRate = self.sample_rate
             ep_cfg.medConfig.channelCount = self.channels

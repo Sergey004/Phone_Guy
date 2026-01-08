@@ -189,11 +189,10 @@ class TTSAccount(VoIPAccount):
                 self.logger.warning("TTS server unavailable")
                 return
 
-            # Generate greeting text (synchronous)
-            self.logger.info("Generating greeting text...")
-            greeting_prompt = "Someone is calling you (literally). Greet them warmly and introduce yourself. Introduce yourself and ask them what they need from you in a polite manner."
-            greeting_text = phoneguy_reply(greeting_prompt)
-            self.logger.info(f"Generated text: '{greeting_text}'")
+            # Use static greeting text (no LLM generation)
+            self.logger.info("Using static greeting text...")
+            greeting_text = "Hello! This is Phone Guy speaking. How can I help you today?"
+            self.logger.info(f"Greeting text: '{greeting_text}'")
 
             # Generate TTS audio (synchronous)
             self.logger.info("Generating TTS voice...")
@@ -336,7 +335,7 @@ def main():
     
     try:
         while True:
-            time.sleep(0.1)
+            bot.get_endpoint().libHandleEvents(10)
             
             # Process hangup queue for current call
             account = bot.get_account()
@@ -365,4 +364,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+   main()
