@@ -27,4 +27,5 @@ pjproject/pjsip-apps/src
 models/*
 native/bindings_wrap.cpp
 native/*.so
-native/build
+native/build/
+voices/
