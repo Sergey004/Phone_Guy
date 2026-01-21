@@ -7,9 +7,9 @@
 from sys import version_info as _swig_python_version_info
 # Import the low-level C/C++ module
 if __package__ or "." in __name__:
-    from . import pcm_media
+    from . import _pcm_media
 else:
-    import pcm_media
+    import _pcm_media
 
 try:
     import builtins as __builtin__
@@ -64,216 +64,210 @@ class SwigPyIterator(object):
     def __init__(self, *args, **kwargs):
         raise AttributeError("No constructor defined - class is abstract")
     __repr__ = _swig_repr
-    __swig_destroy__ = pcm_media.delete_SwigPyIterator
+    __swig_destroy__ = _pcm_media.delete_SwigPyIterator
 
     def value(self):
-        return pcm_media.SwigPyIterator_value(self)
+        return _pcm_media.SwigPyIterator_value(self)
 
     def incr(self, n=1):
-        return pcm_media.SwigPyIterator_incr(self, n)
+        return _pcm_media.SwigPyIterator_incr(self, n)
 
     def decr(self, n=1):
-        return pcm_media.SwigPyIterator_decr(self, n)
+        return _pcm_media.SwigPyIterator_decr(self, n)
 
     def distance(self, x):
-        return pcm_media.SwigPyIterator_distance(self, x)
+        return _pcm_media.SwigPyIterator_distance(self, x)
 
     def equal(self, x):
-        return pcm_media.SwigPyIterator_equal(self, x)
+        return _pcm_media.SwigPyIterator_equal(self, x)
 
     def copy(self):
-        return pcm_media.SwigPyIterator_copy(self)
+        return _pcm_media.SwigPyIterator_copy(self)
 
     def next(self):
-        return pcm_media.SwigPyIterator_next(self)
+        return _pcm_media.SwigPyIterator_next(self)
 
     def __next__(self):
-        return pcm_media.SwigPyIterator___next__(self)
+        return _pcm_media.SwigPyIterator___next__(self)
 
     def previous(self):
-        return pcm_media.SwigPyIterator_previous(self)
+        return _pcm_media.SwigPyIterator_previous(self)
 
     def advance(self, n):
-        return pcm_media.SwigPyIterator_advance(self, n)
+        return _pcm_media.SwigPyIterator_advance(self, n)
 
     def __eq__(self, x):
-        return pcm_media.SwigPyIterator___eq__(self, x)
+        return _pcm_media.SwigPyIterator___eq__(self, x)
 
     def __ne__(self, x):
-        return pcm_media.SwigPyIterator___ne__(self, x)
+        return _pcm_media.SwigPyIterator___ne__(self, x)
 
     def __iadd__(self, n):
-        return pcm_media.SwigPyIterator___iadd__(self, n)
+        return _pcm_media.SwigPyIterator___iadd__(self, n)
 
     def __isub__(self, n):
-        return pcm_media.SwigPyIterator___isub__(self, n)
+        return _pcm_media.SwigPyIterator___isub__(self, n)
 
     def __add__(self, n):
-        return pcm_media.SwigPyIterator___add__(self, n)
+        return _pcm_media.SwigPyIterator___add__(self, n)
 
     def __sub__(self, *args):
-        return pcm_media.SwigPyIterator___sub__(self, *args)
+        return _pcm_media.SwigPyIterator___sub__(self, *args)
     def __iter__(self):
         return self
 
-# Register SwigPyIterator in pcm_media:
-pcm_media.SwigPyIterator_swigregister(SwigPyIterator)
+# Register SwigPyIterator in _pcm_media:
+_pcm_media.SwigPyIterator_swigregister(SwigPyIterator)
 class ShortVector(object):
     thisown = property(lambda x: x.this.own(), lambda x, v: x.this.own(v), doc="The membership flag")
     __repr__ = _swig_repr
 
     def iterator(self):
-        return pcm_media.ShortVector_iterator(self)
+        return _pcm_media.ShortVector_iterator(self)
     def __iter__(self):
         return self.iterator()
 
     def __nonzero__(self):
-        return pcm_media.ShortVector___nonzero__(self)
+        return _pcm_media.ShortVector___nonzero__(self)
 
     def __bool__(self):
-        return pcm_media.ShortVector___bool__(self)
+        return _pcm_media.ShortVector___bool__(self)
 
     def __len__(self):
-        return pcm_media.ShortVector___len__(self)
+        return _pcm_media.ShortVector___len__(self)
 
     def __getslice__(self, i, j):
-        return pcm_media.ShortVector___getslice__(self, i, j)
+        return _pcm_media.ShortVector___getslice__(self, i, j)
 
     def __setslice__(self, *args):
-        return pcm_media.ShortVector___setslice__(self, *args)
+        return _pcm_media.ShortVector___setslice__(self, *args)
 
     def __delslice__(self, i, j):
-        return pcm_media.ShortVector___delslice__(self, i, j)
+        return _pcm_media.ShortVector___delslice__(self, i, j)
 
     def __delitem__(self, *args):
-        return pcm_media.ShortVector___delitem__(self, *args)
+        return _pcm_media.ShortVector___delitem__(self, *args)
 
     def __getitem__(self, *args):
-        return pcm_media.ShortVector___getitem__(self, *args)
+        return _pcm_media.ShortVector___getitem__(self, *args)
 
     def __setitem__(self, *args):
-        return pcm_media.ShortVector___setitem__(self, *args)
+        return _pcm_media.ShortVector___setitem__(self, *args)
 
     def pop(self):
-        return pcm_media.ShortVector_pop(self)
+        return _pcm_media.ShortVector_pop(self)
 
     def append(self, x):
-        return pcm_media.ShortVector_append(self, x)
+        return _pcm_media.ShortVector_append(self, x)
 
     def empty(self):
-        return pcm_media.ShortVector_empty(self)
+        return _pcm_media.ShortVector_empty(self)
 
     def size(self):
-        return pcm_media.ShortVector_size(self)
+        return _pcm_media.ShortVector_size(self)
 
     def swap(self, v):
-        return pcm_media.ShortVector_swap(self, v)
+        return _pcm_media.ShortVector_swap(self, v)
 
     def begin(self):
-        return pcm_media.ShortVector_begin(self)
+        return _pcm_media.ShortVector_begin(self)
 
     def end(self):
-        return pcm_media.ShortVector_end(self)
+        return _pcm_media.ShortVector_end(self)
 
     def rbegin(self):
-        return pcm_media.ShortVector_rbegin(self)
+        return _pcm_media.ShortVector_rbegin(self)
 
     def rend(self):
-        return pcm_media.ShortVector_rend(self)
+        return _pcm_media.ShortVector_rend(self)
 
     def clear(self):
-        return pcm_media.ShortVector_clear(self)
+        return _pcm_media.ShortVector_clear(self)
 
     def get_allocator(self):
-        return pcm_media.ShortVector_get_allocator(self)
+        return _pcm_media.ShortVector_get_allocator(self)
 
     def pop_back(self):
-        return pcm_media.ShortVector_pop_back(self)
+        return _pcm_media.ShortVector_pop_back(self)
 
     def erase(self, *args):
-        return pcm_media.ShortVector_erase(self, *args)
+        return _pcm_media.ShortVector_erase(self, *args)
 
     def __init__(self, *args):
-        pcm_media.ShortVector_swiginit(self, pcm_media.new_ShortVector(*args))
+        _pcm_media.ShortVector_swiginit(self, _pcm_media.new_ShortVector(*args))
 
     def push_back(self, x):
-        return pcm_media.ShortVector_push_back(self, x)
+        return _pcm_media.ShortVector_push_back(self, x)
 
     def front(self):
-        return pcm_media.ShortVector_front(self)
+        return _pcm_media.ShortVector_front(self)
 
     def back(self):
-        return pcm_media.ShortVector_back(self)
+        return _pcm_media.ShortVector_back(self)
 
     def assign(self, n, x):
-        return pcm_media.ShortVector_assign(self, n, x)
+        return _pcm_media.ShortVector_assign(self, n, x)
 
     def resize(self, *args):
-        return pcm_media.ShortVector_resize(self, *args)
+        return _pcm_media.ShortVector_resize(self, *args)
 
     def insert(self, *args):
-        return pcm_media.ShortVector_insert(self, *args)
+        return _pcm_media.ShortVector_insert(self, *args)
 
     def reserve(self, n):
-        return pcm_media.ShortVector_reserve(self, n)
+        return _pcm_media.ShortVector_reserve(self, n)
 
     def capacity(self):
-        return pcm_media.ShortVector_capacity(self)
-    __swig_destroy__ = pcm_media.delete_ShortVector
+        return _pcm_media.ShortVector_capacity(self)
+    __swig_destroy__ = _pcm_media.delete_ShortVector
 
-# Register ShortVector in pcm_media:
-pcm_media.ShortVector_swigregister(ShortVector)
+# Register ShortVector in _pcm_media:
+_pcm_media.ShortVector_swigregister(ShortVector)
 class PcmMedia(object):
     thisown = property(lambda x: x.this.own(), lambda x, v: x.this.own(v), doc="The membership flag")
     __repr__ = _swig_repr
 
     def __init__(self, clockRate=16000, channelCount=1, samplesPerFrame=160):
-        pcm_media.PcmMedia_swiginit(self, pcm_media.new_PcmMedia(clockRate, channelCount, samplesPerFrame))
-    __swig_destroy__ = pcm_media.delete_PcmMedia
+        _pcm_media.PcmMedia_swiginit(self, _pcm_media.new_PcmMedia(clockRate, channelCount, samplesPerFrame))
+    __swig_destroy__ = _pcm_media.delete_PcmMedia
 
     def initialize(self):
-        return pcm_media.PcmMedia_initialize(self)
+        return _pcm_media.PcmMedia_initialize(self)
 
     def start(self):
-        return pcm_media.PcmMedia_start(self)
+        return _pcm_media.PcmMedia_start(self)
 
     def stop(self):
-        return pcm_media.PcmMedia_stop(self)
-
-    def push(self, samples, count):
-        return pcm_media.PcmMedia_push(self, samples, count)
-
-# Register PcmMedia in pcm_media:
-pcm_media.PcmMedia_swigregister(PcmMedia)
-
-class PcmMediaWrapper:
-    """Python wrapper for PcmMedia C++ class"""
-    def __init__(self, clockRate=16000, channelCount=1, samplesPerFrame=160):
-        self._obj = new_PcmMedia(clockRate, channelCount, samplesPerFrame)
-
-    def start(self):
-        """Start audio processing"""
-        return PcmMedia_start(self._obj)
-
-    def stop(self):
-        """Stop audio processing"""
-        return PcmMedia_stop(self._obj)
+        return _pcm_media.PcmMedia_stop(self)
 
     def push(self, samples):
-        """Push PCM samples"""
-        if isinstance(samples, bytes):
-# Convert bytes to array of int16
-            import array
-            arr = array.array('h', samples)
-            samples = arr
-        return PcmMedia_push(self._obj, samples)
+        return _pcm_media.PcmMedia_push(self, samples)
 
-    def __del__(self):
-        """Cleanup"""
-        if hasattr(self, '_obj'):
-            delete_PcmMedia(self._obj)
+    def getReceiveBufferSize(self):
+        return _pcm_media.PcmMedia_getReceiveBufferSize(self)
 
-# Replace PcmMedia with the wrapper for normal use
-PcmMedia = PcmMediaWrapper
+# Register PcmMedia in _pcm_media:
+_pcm_media.PcmMedia_swigregister(PcmMedia)
+
+import array
+
+def pcm_media_from_bytes(data, clock_rate=16000, channels=1, samples_per_frame=160):
+    """
+    Create PcmMedia from bytes and initialize it.
+
+    Args:
+        data: bytes object with PCM16 audio
+        clock_rate: Sample rate in Hz
+        channels: Number of channels
+        samples_per_frame: Samples per frame
+
+    Returns:
+        PcmMedia instance
+    """
+    pcm = PcmMedia(clock_rate, channels, samples_per_frame)
+    pcm.initialize()
+    if data:
+        pcm.push(data)
+    return pcm
 
 

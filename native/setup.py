@@ -1,74 +1,78 @@
 from setuptools import setup, Extension
+from setuptools.command.build_ext import build_ext
 import os
+import sys
 
 # Get absolute path to pjproject
 base_dir = os.path.dirname(os.path.abspath(__file__))
-pjproject_include = os.path.join(os.path.dirname(base_dir), "pjproject", "pjsip", "include")
-pjproject_lib = os.path.join(os.path.dirname(base_dir), "pjproject")
-pjlib_lib = os.path.join(pjproject_lib, "pjlib", "lib")
-pjlib_util_lib = os.path.join(pjproject_lib, "pjlib-util", "lib")
-pjnath_lib = os.path.join(pjproject_lib, "pjnath", "lib")
-pjmedia_lib = os.path.join(pjproject_lib, "pjmedia", "lib")
-pjsip_lib = os.path.join(pjproject_lib, "pjsip", "lib")
-pjlib_util_include = os.path.join(os.path.dirname(base_dir), "pjproject", "pjlib-util", "include")
-pjmedia_include = os.path.join(os.path.dirname(base_dir), "pjproject", "pjmedia", "include")
-pjnath_include = os.path.join(os.path.dirname(base_dir), "pjproject", "pjnath", "include")
-pjlib_include = os.path.join(os.path.dirname(base_dir), "pjproject", "pjlib", "include")
+root_dir = os.path.dirname(base_dir)
+pjproject_dir = os.path.join(root_dir, "pjproject")
+
+# Include directories
+include_dirs = [
+    os.path.join(pjproject_dir, "pjlib", "include"),
+    os.path.join(pjproject_dir, "pjlib-util", "include"),
+    os.path.join(pjproject_dir, "pjmedia", "include"),
+    os.path.join(pjproject_dir, "pjnath", "include"),
+    os.path.join(pjproject_dir, "pjsip", "include"),
+    os.path.join(pjproject_dir, "pjsip", "include", "pjsua-lib"),
+    os.path.join(pjproject_dir, "pjsip", "include", "pjsua2"),
+    base_dir,
+]
+
+# Library directories
+lib_dirs = [
+    os.path.join(pjproject_dir, "pjlib", "lib"),
+    os.path.join(pjproject_dir, "pjlib-util", "lib"),
+    os.path.join(pjproject_dir, "pjnath", "lib"),
+    os.path.join(pjproject_dir, "pjmedia", "lib"),
+    os.path.join(pjproject_dir, "pjsip", "lib"),
+]
 
 ext = Extension(
-    name="pcm_media",
+    name="_pcm_media",
     sources=[
-        "bindings.i",
-        "pcm_media.cpp",
+        os.path.join(base_dir, "bindings.i"),
+        os.path.join(base_dir, "pcm_media.cpp"),
     ],
-    include_dirs=[
-        "pjproject/pjlib/include",
-        "pjproject/pjlib-util/include",
-        "pjproject/pjmedia/include",
-        "pjproject/pjnath/include",
-        "pjproject/pjsip/include",
-        "pjproject/pjsip/include/pjsua-lib",
-        "pjproject/pjsip/include/pjsua2",
-        "native",
-    ],
-    library_dirs=[
-        pjlib_lib,
-        pjlib_util_lib,
-        pjnath_lib,
-        pjmedia_lib,
-        pjsip_lib,
-    ],
+    include_dirs=include_dirs,
+    library_dirs=lib_dirs,
     libraries=[
-        "pjsua2", "pjsua", "pjmedia", "pjmedia-codec", "pjmedia-audiodev", 
-        "pjnath", "pjlib-util", "pj"
+        "pjsua2",
+        "pjsua",
+        "pjmedia",
+        "pjmedia-codec",
+        "pjmedia-audiodev",
+        "pjnath",
+        "pjlib-util",
+        "pj",
     ],
     runtime_library_dirs=[
         "$ORIGIN/../pjproject/pjlib/lib",
+        "$ORIGIN/../pjproject/pjlib-util/lib",
         "$ORIGIN/../pjproject/pjmedia/lib",
+        "$ORIGIN/../pjproject/pjnath/lib",
         "$ORIGIN/../pjproject/pjsip/lib",
     ],
     extra_compile_args=[
-        f"-I{pjproject_include}",
-        f"-I{pjlib_include}",
-        f"-I{pjlib_util_include}",
-        f"-I{pjmedia_include}",
-        f"-I{pjnath_include}",
-    ],
-    swig_opts=["-c++", 
-               "-interface", "pcm_media",
-               f"-I{pjproject_include}",
-               "-I pjproject/pjlib/include", 
-               "-I pjproject/pjlib-util/include", 
-               "-I pjproject/pjmedia/include", 
-               "-I pjproject/pjsip/include", 
-               "-I pjproject/pjsip/include/pjsua-lib", 
-               "-I pjproject/pjsip/include/pjsua2", 
-               "-I pjproject/pjnath/include"],
+        "-std=c++11",
+        "-fPIC",
+        "-Wno-write-strings",
+        "-Wno-deprecated-declarations",
+    ] + [f"-I{d}" for d in include_dirs],
+    swig_opts=[
+        "-c++",
+        "-Wall",
+    ] + [f"-I{d}" for d in include_dirs],
     language="c++",
 )
 
 setup(
     name="pcm_media",
-    version="0.1",
+    version="0.1.0",
+    description="PCM audio media port for PJSUA2",
+    author="PhoneGuy Bot",
+    py_modules=["pcm_media"],
     ext_modules=[ext],
+    zip_safe=False,
 )
