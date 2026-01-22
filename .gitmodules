@@ -1,4 +1,0 @@
-[submodule "pjproject"]
-	path = pjproject
-	url = https://github.com/pjsip/pjproject
-	ignore = dirty
