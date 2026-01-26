@@ -1,10 +1,13 @@
-import time
+"""
+SimpleSIP Orchestrator - Pure Python implementation
+No PJSIP dependencies - uses SimpleSIP library
+"""
+
+import asyncio
 import logging
-import threading
 import sys
 import os
 import socket
-import random
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -12,21 +15,27 @@ load_dotenv()
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-try:
-    import pj
-except Exception:
-    try:
-        import pjsua2 as pj
-    except Exception:
-        pj = None
+from simple_sip import SipClient
 
-from AI import rtp_handler, sip_engine, stt_adapter, llm_adapter
+# Try to import adapters
+try:
+    from AI import stt_adapter
+except Exception as e:
+    logging.warning(f'STT adapter import failed: {e}')
+    stt_adapter = None
 
 try:
-    from AI import tts_adapter
+    from AI import llm_adapter
+except Exception as e:
+    logging.warning(f'LLM adapter import failed: {e}')
+    llm_adapter = None
+
+try:
+    from AI.tts_adapter_simple import SimpleTTSAdapter
+    TTS_AVAILABLE = True
 except Exception as e:
     logging.warning(f'TTS adapter import failed: {e}')
-    tts_adapter = None
+    TTS_AVAILABLE = False
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,7 +46,14 @@ SIP_PORT = int(os.getenv('SIP_PORT', '5060'))
 SIP_USER = os.getenv('SIP_USER', 'phoneguy')
 SIP_PASSWORD = os.getenv('SIP_PASSWORD', 'password')
 SIP_SERVER = os.getenv('SIP_SERVER', f'{SIP_DOMAIN}:{SIP_PORT}')
-LOCAL_IP = os.getenv('LOCAL_IP', '192.168.1.181') 
+LOCAL_IP = os.getenv('LOCAL_IP', '192.168.1.181')
+
+# TTS Configuration
+TTS_ENGINE = os.getenv('TTS_ENGINE', 'turbo')
+TTS_DEVICE = os.getenv('TTS_DEVICE', 'cuda')
+RVC_ENABLED = os.getenv('RVC_ENABLED', 'false').lower() == 'true'
+RVC_MODEL_PATH = os.getenv('RVC_MODEL_PATH', '')
+RVC_INDEX_PATH = os.getenv('RVC_INDEX_PATH', '')
 
 def get_local_ip():
     try:
@@ -51,207 +67,121 @@ def get_local_ip():
 
 current_ip = LOCAL_IP if LOCAL_IP else get_local_ip()
 
-# === FIX 1: Use Inheritance for Account Callbacks ===
-class PhoneAccount(pj.Account): 
-    def __init__(self):
-        super().__init__()
-        self.active_calls = []
-
-    def onRegState(self, prm):
-        """Handle registration state changes."""
-        try:
-            info = self.getInfo()
-            logging.info(f'📝 SIP Registration Status: {info.regStatus} ({info.regReason})')
-        except Exception as e:
-            logging.exception('onRegState error')
-
-    def onIncomingCall(self, prm):
-        """Handle incoming SIP call with MANUAL SDP and NO PJSIP MEDIA."""
-        try:
-            logging.info('📞 Incoming call received (Signaling Only Mode)')
-            
-            # Create Call Object using our wrapper
-            call = sip_engine.PhoneCall(self, prm.callId)
-            self.active_calls.append(call)
-
-            # 1. Prepare Manual RTP Port
-            local_rtp_port = random.randrange(10000, 20000, 2)
-            
-            # 2. Construct Manual SDP
-            # We must provide this so Asterisk knows where to send audio (our raw socket),
-            # even though we tell PJSIP audioCount=0.
-            sdp = (
-                "v=0\r\n"
-                f"o=- {int(time.time())} {int(time.time())} IN IP4 {current_ip}\r\n"
-                "s=pj-manual\r\n"
-                f"c=IN IP4 {current_ip}\r\n"
-                "t=0 0\r\n"
-                f"m=audio {local_rtp_port} RTP/AVP 8 101\r\n"
-                "a=rtpmap:8 PCMA/8000\r\n"
-                "a=rtpmap:101 telephone-event/8000\r\n"
-                "a=fmtp:101 0-16\r\n"
-                "a=sendrecv\r\n"
-            )
-
-            # 3. Configure Answer Parameters
-            call_prm = pj.CallOpParam()
-            call_prm.statusCode = 200
-            
-            # === FIX 2: PREVENT 488 ERROR ===
-            # Explicitly tell PJSIP we have 0 audio streams. 
-            # This stops PJSIP from checking for codecs or trying to negotiate media.
-            call_prm.opt.audioCount = 0
-            call_prm.opt.videoCount = 0
-            
-            # === FIX 3: OVERRIDE SDP ===
-            # PJSIP would normally send "m=audio 0" (disabled).
-            # We force it to send our custom SDP with the REAL port.
-            call_prm.txOption.msgBody = sdp
-            call_prm.txOption.contentType = "application/sdp"
-
-            # 4. Send 200 OK
-            call.answer(call_prm)
-            
-            # 5. Start Manual RTP Handler
-            call.start_manual_rtp(local_rtp_port)
-            
-            logging.info(f'✅ Call answered. PJSIP Media: OFF. Manual RTP: ON (Port {local_rtp_port})')
-            
-        except Exception as e:
-            logging.exception('onIncomingCall error')
-
-def register_sip_account(ep):
-    """Register SIP account using the inherited class."""
-    if ep is None or pj is None:
-        return None
-
-    try:
-        logging.info(f'Target: {SIP_USER}@{SIP_SERVER}')
-        
-        acc_cfg = pj.AccountConfig()
-        acc_cfg.idUri = f'sip:{SIP_USER}@{SIP_DOMAIN}'
-        acc_cfg.regConfig.registrarUri = f'sip:{SIP_SERVER}'
-        
-        cred = pj.AuthCredInfo("digest", "*", SIP_USER, 0, SIP_PASSWORD)
-        acc_cfg.sipConfig.authCreds.append(cred)
-        
-        # Instantiate our custom class
-        account = PhoneAccount() 
-        account.create(acc_cfg)
-        
-        return account
-    except Exception as e:
-        logging.exception(f'Failed to register SIP account')
-        return None
-
-def _init_endpoint():
-    """Initialize PJSIP in absolute minimal mode."""
-    if pj is None:
-        return None
-
-    try:
-        ep = pj.Endpoint()
-        ep.libCreate()
-        
-        cfg = pj.EpConfig()
-        # Disable internal media engine
-        cfg.medConfig.noAudio = True 
-        cfg.uaConfig.threadCnt = 1
-        cfg.uaConfig.mainThreadOnly = False
-        
-        ep.libInit(cfg)
-        
-        tcfg = pj.TransportConfig()
-        tcfg.port = 5060 
-        ep.transportCreate(pj.PJSIP_TRANSPORT_UDP, tcfg)
-        
-        ep.libStart()
-        logging.info('✓ Endpoint ready (Signaling Only Mode)')
-        return ep
-    except Exception as e:
-        logging.exception('Endpoint init failed')
-        return None
-
-def try_transcribe(stt, pcm):
+async def try_transcribe(stt, pcm):
     if not stt: return None
     try:
-        return stt.transcribe_pcm(pcm) if hasattr(stt, 'transcribe_pcm') else None
+        return await stt.transcribe_pcm_async(pcm) if hasattr(stt, 'transcribe_pcm_async') else None
     except: return None
 
-def try_llm_query(llm, text):
+async def try_llm_query(llm, text):
     if not llm: return ""
     try:
-        return llm.phoneguy_reply(text) if hasattr(llm, 'phoneguy_reply') else ""
+        return await llm.phoneguy_reply_async(text) if hasattr(llm, 'phoneguy_reply_async') else ""
     except: return ""
 
-def try_tts_synthesize(tts, text):
+async def try_tts_synthesize(tts, text):
     if not tts: return None
     try:
-        return tts.synthesize_sync(text) if hasattr(tts, 'synthesize_sync') else None
+        return await tts.synthesize(text) if hasattr(tts, 'synthesize') else None
     except: return None
 
-def orchestrator_loop():
-    ep = _init_endpoint()
-    account = None
+async def orchestrator_loop():
+    """Main orchestrator loop using SimpleSIP."""
     
-    if ep is not None:
-        account = register_sip_account(ep)
-        time.sleep(2) # Give registration a moment
-
+    # Initialize SIP client
+    client = SipClient(
+        user=SIP_USER,
+        pwd=SIP_PASSWORD,
+        server=SIP_SERVER,
+        local_ip=current_ip
+    )
+    
+    await client.start()
+    
+    # Register
+    if await client.register():
+        logging.info('✓ Registered successfully!')
+    else:
+        logging.error('✗ Registration failed!')
+        return
+    
+    # Initialize AI components
     try:
         stt = stt_adapter.STTAdapter(config={}, logger=logger)
     except: stt = None
     
     try:
-        import AI.llm_adapter as llm_mod
-        llm = llm_mod
+        llm = llm_adapter
     except: llm = None
-
-    try:
-        tts = tts_adapter.TTSAdapter(config={}, logger=logger)
-    except: tts = None
-
+    
+    # Initialize TTS
+    tts = None
+    if TTS_AVAILABLE and RVC_ENABLED and RVC_MODEL_PATH:
+        try:
+            tts = SimpleTTSAdapter(config={
+                'tts': {
+                    'engine': TTS_ENGINE,
+                    'device': TTS_DEVICE,
+                    'rvc_enabled': RVC_ENABLED,
+                    'rvc_model_path': RVC_MODEL_PATH,
+                    'rvc_index_path': RVC_INDEX_PATH,
+                    'rvc_f0_method': 'rmvpe',
+                    'rvc_pitch_shift': 0,
+                    'rvc_index_rate': 0.5
+                }
+            }, logger=logger)
+            logging.info('✓ TTS initialized with RVC!')
+        except Exception as e:
+            logging.error(f'✗ TTS initialization failed: {e}')
+            tts = None
+    
     logging.info('🎧 AI components initialized. Waiting for calls...')
-
+    
+    # For now, we'll make an outbound call as a test
+    # In a real scenario, this would handle incoming calls
     try:
-        while True:
-            active_call = None
-            if account:
-                # Poll active calls from our Account object
-                for c in account.active_calls:
-                    if hasattr(c, 'rtp') and c.rtp is not None:
-                        active_call = c
-                        break
+        # Make a test call
+        target = os.getenv('TARGET_NUMBER', '1002')
+        
+        logging.info(f'📞 Calling {target}...')
+        call = await client.invite(target)
+        
+        if call.success:
+            logging.info('✓ Call established!')
             
-            if active_call is None:
-                time.sleep(0.1)
-                continue
-
-            # --- RTP/AI Loop ---
-            rtp = active_call.rtp
+            # Send some test audio
+            if tts:
+                text = "Hello, this is a test call from the AI phone system."
+                logging.info(f'🎤 Speaking: {text}')
+                
+                pcm_data = await tts.synthesize(text)
+                if pcm_data:
+                    import audioop
+                    pcma_data = audioop.lin2alaw(pcm_data, 2)
+                    await call.send_audio(pcma_data)
+                    logging.info('✓ Audio sent!')
+            else:
+                # Send dummy audio
+                dummy_audio = b'\xd5' * (8000 * 5)
+                await call.send_audio(dummy_audio)
+                logging.info('✓ Dummy audio sent!')
             
-            # Non-blocking read from RTP buffer
-            pcm = rtp.get_next_rx_chunk(timeout=0.02)
+            # Wait a bit
+            await asyncio.sleep(2)
             
-            if pcm:
-                text = try_transcribe(stt, pcm)
-                if text:
-                    logging.info(f"🗣️ User: {text}")
-                    reply = try_llm_query(llm, text)
-                    if reply:
-                        logging.info(f"🤖 Bot: {reply}")
-                        out_pcm = try_tts_synthesize(tts, reply)
-                        if out_pcm:
-                            rtp.add_tx_pcm(out_pcm)
-            
+            # End call
+            await call.bye()
+            logging.info('✓ Call ended!')
+        else:
+            logging.error('✗ Call failed to establish!')
+        
     except KeyboardInterrupt:
         logging.info('Stopping')
+    except Exception as e:
+        logging.error(f'Error: {e}', exc_info=True)
     finally:
-        try:
-            if ep is not None:
-                ep.libDestroy()
-        except Exception:
-            pass
+        await client.stop()
+        logging.info('✓ Done!')
 
 if __name__ == '__main__':
-    orchestrator_loop()
+    asyncio.run(orchestrator_loop())
