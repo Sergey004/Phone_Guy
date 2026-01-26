@@ -29,3 +29,6 @@ native/bindings_wrap.cpp
 native/*.so
 native/build/
 voices/
+pjproject/
+pyVoIP/
+.pytest_cache/
