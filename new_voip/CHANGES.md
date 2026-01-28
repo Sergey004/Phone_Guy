@@ -1,4 +1,4 @@
-/home/user/Test_Phone_new/2022-07-22 - Phaera Homebound.wav# Изменения и исправления в new_voip
+# Изменения и исправления в new_voip
 
 ## Обзор
 

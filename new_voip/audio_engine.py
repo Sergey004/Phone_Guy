@@ -1,14 +1,13 @@
 import asyncio
 import numpy as np
 import wave
-import time
+import audioop
 from abc import ABC, abstractmethod
 from audio_codecs import AudioCodec
 
 class AudioSource(ABC):
     @abstractmethod
     def get_frame(self, samples_needed: int) -> bytes:
-        """Должен вернуть A-Law закодированные байты для отправки."""
         pass
 
 class TTSSource(AudioSource):
@@ -19,40 +18,28 @@ class TTSSource(AudioSource):
         self.is_speaking = False
 
     def push_audio(self, audio_array: np.ndarray, src_rate=24000):
-        """
-        Принимает numpy array (float32).
-        Если src_rate != 8000, делает грубый ресемплинг.
-        """
-        # 1. Resampling (простейший: пропуск сэмплов)
         if src_rate != self.sample_rate:
             step = int(src_rate / self.sample_rate)
             audio_array = audio_array[::step]
 
-        # 2. Convert to int16
         pcm16 = AudioCodec.float_to_pcm16(audio_array)
         
-        # 3. Convert to A-Law
+        # Здесь исправление уже внутри AudioCodec.pcm16_to_alaw
         alaw_bytes = AudioCodec.pcm16_to_alaw(pcm16)
         
-        # 4. Put into buffer (синхронно, так как это байты)
         self.buffer += alaw_bytes
         self.is_speaking = True
 
     def get_frame(self, samples_needed: int) -> bytes:
-        # A-law: 1 сэмпл = 1 байт.
         bytes_needed = samples_needed
-        
         if len(self.buffer) >= bytes_needed:
             chunk = self.buffer[:bytes_needed]
             self.buffer = self.buffer[bytes_needed:]
             return chunk
         else:
-            # Если буфер пуст или почти пуст
             chunk = self.buffer
             self.buffer = b''
-            padding = AudioCodec.create_silence(duration_ms=0) # dummy
             missing = bytes_needed - len(chunk)
-            # Заполняем тишиной остаток
             return chunk + (b'\xd5' * missing)
 
 class FilePlayerSource(AudioSource):
@@ -66,8 +53,12 @@ class FilePlayerSource(AudioSource):
     def _open(self):
         try:
             self.wf = wave.open(self.filepath, 'rb')
-            if self.wf.getnchannels() != 1 or self.wf.getframerate() != 8000:
-                print(f"[WARN] Файл {self.filepath} должен быть 8000Hz Mono!")
+            # Проверка формата
+            if self.wf.getnchannels() != 1:
+                print(f"[WARN] Файл {self.filepath} стерео! Используйте convert_audio.py.")
+            if self.wf.getframerate() != 8000:
+                print(f"[WARN] Файл {self.filepath} не 8000Hz! Звук будет искажен.")
+                
             self.active = True
         except Exception as e:
             print(f"[ERR] Не удалось открыть файл: {e}")
@@ -79,18 +70,17 @@ class FilePlayerSource(AudioSource):
 
         data = self.wf.readframes(samples_needed)
         
-        # Конвертация PCM16 (wav) -> A-law
-        # Если файл уже A-law, пропускаем. Допустим файл PCM16.
-        import audioop
-        # width=1 для 8-bit A-law (как в pyVoIP)
-        converted = audioop.lin2alaw(data, 1)
+        # !!! ИСПРАВЛЕНО ЗДЕСЬ !!!
+        # width=2, потому что WAV файл 16-битный
+        converted = audioop.lin2alaw(data, 2)
 
         if len(converted) < samples_needed:
             if self.loop:
                 self.wf.rewind()
                 remaining = samples_needed - len(converted)
                 data_new = self.wf.readframes(remaining)
-                converted += audioop.lin2alaw(data_new, 1)
+                # !!! И ЗДЕСЬ ТОЖЕ !!!
+                converted += audioop.lin2alaw(data_new, 2)
             else:
                 padding = b'\xd5' * (samples_needed - len(converted))
                 converted += padding

@@ -83,6 +83,8 @@ class SIPClient(asyncio.DatagramProtocol):
         self.remote_tag = None # Заполняется при ответе сервера (200 OK)
         self.branch = "z9hG4bK" + ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
         self.cseq = 1
+        self.sess_id = random.randint(1, 999999999)  # SDP session ID (ДОЛЖЕН БЫТЬ ЧИСЛОМ!)
+        self.sess_version = 1  # SDP session version (увеличивается при каждом INVITE)
         
         self.registered = False
         self.current_target = None # Кому звоним
@@ -110,7 +112,7 @@ class SIPClient(asyncio.DatagramProtocol):
         self.audio_source = source
 
     def send_raw(self, msg):
-        # print(f">>> SENDING:\n{msg}") # Раскомментируй для отладки
+        print(f">>> SENDING:\n{msg}") # Отладочный вывод
         self.transport.sendto(msg.encode(), (self.server_ip, 5060))
 
     async def register(self):
@@ -169,8 +171,13 @@ class SIPClient(asyncio.DatagramProtocol):
         return msg
 
     def _build_invite_packet(self, target, auth_header=None):
+        # Увеличиваем версию сессии при каждом INVITE
+        self.sess_version += 1
+        
         sdp = f"v=0\r\n"
-        sdp += f"o=- {self.call_id} {self.cseq} IN IP4 {self.local_ip}\r\n"
+        # SDP origin line: o=<username> <sess-id> <sess-version> <nettype> <addrtype> <address>
+        # sess-id и sess-version ДОЛЖНЫ БЫТЬ ЧИСЛАМИ!
+        sdp += f"o=- {self.sess_id} {self.sess_version} IN IP4 {self.local_ip}\r\n"
         sdp += f"s=-\r\n"
         sdp += f"c=IN IP4 {self.local_ip}\r\n"
         sdp += f"t=0 0\r\n"
@@ -207,6 +214,70 @@ class SIPClient(asyncio.DatagramProtocol):
                 return line[len(header_name)+1:].strip()
         return None
 
+    def _send_200_ok_response(self, request_msg):
+        """Отправляет 200 OK ответ на запрос"""
+        lines = request_msg.splitlines()
+        from_header = self._extract_header(lines, "From")
+        to_header = self._extract_header(lines, "To")
+        call_id = self._extract_header(lines, "Call-ID")
+        via_header = self._extract_header(lines, "Via")
+        cseq = self._extract_header(lines, "CSeq")
+        
+        # Генерируем новый tag для ответа
+        new_tag = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+        
+        # Формируем To с тегом
+        if to_header and "tag=" not in to_header:
+            to_header_with_tag = to_header + f";tag={new_tag}"
+        else:
+            to_header_with_tag = to_header
+        
+        response = "SIP/2.0 200 OK\r\n"
+        response += f"{via_header}\r\n"
+        response += f"From: {from_header}\r\n"
+        response += f"To: {to_header_with_tag}\r\n"
+        response += f"Call-ID: {call_id}\r\n"
+        response += f"CSeq: {cseq}\r\n"
+        response += f"User-Agent: PythonAIPhone/1.0\r\n"
+        response += "Content-Length: 0\r\n\r\n"
+        
+        # Отправляем ответ
+        self.transport.sendto(response.encode(), (self.server_ip, 5060))
+
+    def _send_options_response(self, request_msg):
+        """Отправляет 200 OK ответ на OPTIONS с поддерживаемыми методами"""
+        lines = request_msg.splitlines()
+        from_header = self._extract_header(lines, "From")
+        to_header = self._extract_header(lines, "To")
+        call_id = self._extract_header(lines, "Call-ID")
+        via_header = self._extract_header(lines, "Via")
+        cseq = self._extract_header(lines, "CSeq")
+        contact_header = self._extract_header(lines, "Contact")
+        
+        # Генерируем новый tag для ответа
+        new_tag = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+        
+        # Формируем To с тегом
+        if to_header and "tag=" not in to_header:
+            to_header_with_tag = to_header + f";tag={new_tag}"
+        else:
+            to_header_with_tag = to_header
+        
+        response = "SIP/2.0 200 OK\r\n"
+        response += f"{via_header}\r\n"
+        response += f"From: {from_header}\r\n"
+        response += f"To: {to_header_with_tag}\r\n"
+        response += f"Call-ID: {call_id}\r\n"
+        response += f"CSeq: {cseq}\r\n"
+        response += f"Contact: {contact_header}\r\n" if contact_header else f"Contact: <sip:{self.username}@{self.local_ip}:{self.sip_port}>\r\n"
+        response += f"Allow: INVITE, ACK, CANCEL, OPTIONS, BYE, REGISTER\r\n"
+        response += f"Accept: application/sdp\r\n"
+        response += f"User-Agent: PythonAIPhone/1.0\r\n"
+        response += "Content-Length: 0\r\n\r\n"
+        
+        # Отправляем ответ
+        self.transport.sendto(response.encode(), (self.server_ip, 5060))
+
     # --- Handlers ---
     async def handle_sip_message(self, msg, addr):
         try:
@@ -239,9 +310,17 @@ class SIPClient(asyncio.DatagramProtocol):
                 self.cseq += 1
                 self.branch = "z9hG4bK" + ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
                 
-                # Добавляем transport=UDP как в pyVoIP
-                response = self._generate_auth(nonce, realm, cseq_method, f"sip:{self.server_ip};transport=UDP")
-                auth_header = f'Authorization: Digest username="{self.username}", realm="{realm}", nonce="{nonce}", uri="sip:{self.server_ip};transport=UDP", response="{response}", algorithm=MD5'
+                # Для REGISTER URI указывает на сервер
+                # Для INVITE URI указывает на целевой номер
+                if cseq_method == "REGISTER":
+                    uri = f"sip:{self.server_ip};transport=UDP"
+                elif cseq_method == "INVITE":
+                    uri = f"sip:{self.current_target}@{self.server_ip};transport=UDP"
+                else:
+                    uri = f"sip:{self.server_ip};transport=UDP"
+                
+                response = self._generate_auth(nonce, realm, cseq_method, uri)
+                auth_header = f'Authorization: Digest username="{self.username}", realm="{realm}", nonce="{nonce}", uri="{uri}", response="{response}", algorithm=MD5'
                 
                 if cseq_method == "REGISTER":
                     req = self._build_register_packet(auth_header)
@@ -302,7 +381,26 @@ class SIPClient(asyncio.DatagramProtocol):
                     )
                     self.rtp_protocol = protocol
 
-            # --- 6. Обработка ошибок ---
+            # --- 6. Обработка NOTIFY (MWI и др.) ---
+            elif "NOTIFY" in first_line:
+                # NOTIFY используется для MWI (Message Waiting Indicator)
+                # Отправляем 200 OK без обработки
+                print("[SIP] Received NOTIFY (ignoring)")
+                self._send_200_ok_response(msg)
+                
+            # --- 7. Обработка OPTIONS (проверка доступности) ---
+            elif "OPTIONS" in first_line:
+                # OPTIONS используется для проверки доступности
+                # Отправляем 200 OK с поддерживаемыми методами
+                print("[SIP] Received OPTIONS (responding)")
+                self._send_options_response(msg)
+                
+            # --- 8. Обработка 400 Bad Request ---
+            elif "400 Bad Request" in first_line:
+                print("[SIP] ERROR: Bad Request - server rejected our request")
+                print(f"[SIP] Full message:\n{msg}")
+                
+            # --- 9. Обработка других ошибок ---
             elif "486 Busy" in first_line:
                 print(f"[SIP] {self.current_target} is busy")
             elif "404 Not Found" in first_line:
@@ -317,6 +415,9 @@ class SIPClient(asyncio.DatagramProtocol):
                 print("[SIP] Service unavailable")
             elif "408 Request Timeout" in first_line:
                 print("[SIP] Request timeout")
+            elif "200 OK" in first_line:
+                # Логируем 200 OK, которые не обработаны выше
+                print(f"[SIP] Received 200 OK (unhandled): {first_line}")
             else:
                 # Логируем неизвестные ответы для отладки
                 print(f"[SIP] Received: {first_line}")
