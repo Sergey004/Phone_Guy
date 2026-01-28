@@ -1,6 +1,6 @@
 import asyncio
-from sip_rtp_client import SIPClient
-from audio_engine import FilePlayerSource
+from new_voip.sip_rtp_client import SIPClient
+from new_voip.audio_engine import FilePlayerSource
 
 # === НАСТРОЙКИ ===
 SIP_USER = "555533"          # Твой номер
@@ -11,7 +11,7 @@ TARGET_NUMBER = "1001"     # Кому звоним
 
 async def main():
     # 1. Создаем источник звука (плеер файлов)
-    audio_file = "output_phone.wav"  # Конвертированный файл 8000Hz Mono
+    audio_file = "audio.wav"  # Конвертированный файл 8000Hz Mono
     player = FilePlayerSource(audio_file, loop=False)  # loop=True для зацикливания
     
     # 2. Создаем SIP клиента

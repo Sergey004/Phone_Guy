@@ -101,7 +101,7 @@ class TTSAdapter:
                 wave = np.array(wav)
             
             # 2. RVC Обработка (Если включена)
-            if self.rvc_enabled and self.rvc_model_path:
+            if self.rvc_enabled and self.rvc_model_path and rvc_infer:
                  try:
                      wave_np = np.asarray(wave)
                      if wave_np.ndim > 1: wave_np = np.squeeze(wave_np)
