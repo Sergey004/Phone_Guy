@@ -32,3 +32,4 @@ voices/
 pjproject/
 pyVoIP/
 .pytest_cache/
+new_voip/models/

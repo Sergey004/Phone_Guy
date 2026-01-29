@@ -1,7 +1,29 @@
 import asyncio
 import logging
 import os
+import sys
 from dotenv import load_dotenv
+
+# Проверка зависимостей перед запуском
+try:
+    import torch
+    print(f"✓ PyTorch {torch.__version__} detected")
+except ImportError:
+    print("❌ ERROR: PyTorch not found!")
+    print("Please run the application using the virtual environment:")
+    print("  source /home/user/Test_Phone_new/.venv/bin/activate")
+    print("  python new_voip/main_integration.py")
+    sys.exit(1)
+
+try:
+    from rvc_py.rvc_infer import rvc_infer
+    print("✓ RVC module imported successfully")
+except ImportError as e:
+    print(f"❌ ERROR: RVC module import failed: {e}")
+    print("Please run the application using the virtual environment:")
+    print("  source /home/user/Test_Phone_new/.venv/bin/activate")
+    print("  python new_voip/main_integration.py")
+    sys.exit(1)
 
 # Импортируем "слонов"
 from stt_adapter import STTAdapter
