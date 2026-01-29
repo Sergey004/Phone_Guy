@@ -35,10 +35,10 @@ if NVIDIA_API_KEY:
             api_key=NVIDIA_API_KEY,
             base_url=NVIDIA_API_BASE if NVIDIA_API_BASE else None,
             model=os.getenv("NVIDIA_MODEL", "meta/llama3-70b-instruct"), # Дефолтная модель если нет в env
-            temperature=0.6,
+            temperature=1.5,
             top_p=0.7,
             max_tokens=1024,
-            extra_body={"chat_template_kwargs": {"thinking": False}}
+            extra_body={"chat_template_kwargs": {"thinking": True}}
         )
         logger.info(f"✅ NVIDIA API configured with model: {os.getenv('NVIDIA_MODEL')}")
         AI_ENABLED = True

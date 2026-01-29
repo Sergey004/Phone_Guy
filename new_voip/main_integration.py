@@ -51,11 +51,10 @@ MOCK_CONFIG = {
         'engine': 'turbo',
         'device': 'cuda',      # или cpu
         'language_id': 'en',
-        'audio_prompt_path': "/home/user/Test_Phone_new/models/RVC/PhoneGuyFNAF1/PhoneGuy_FNAF1_01.wav",
+        'audio_prompt_path': "/home/user/Test_Phone_new/new_voip/models/RVC/PhoneGuyFNAF1/PhoneGuy_FNAF1_01.wav",
           # === Настройки RVC ===
         'rvc_enabled': True,
-        'rvc_model_path': '/home/user/Test_Phone_new/models/RVC/PhoneGuyFNAF1/PhoneGuyFNAF1_e1000_s22000.pth',
-        'rvc_index_path': '/home/user/Test_Phone_new/models/RVC/PhoneGuyFNAF1/added_IVF339_Flat_nprobe_1_PhoneGuyFNAF1_v2.index', # Если есть
+        'rvc_model_path': '/home/user/Test_Phone_new/new_voip/models/RVC/PhoneGuyFNAF1/PhoneGuyFNAF1_e1000_s22000.pth',        'rvc_index_path': '/home/user/Test_Phone_new/new_voip/models/RVC/PhoneGuyFNAFadded_IVF339_Flat_nprobe_1_PhoneGuyFNAF1_v2.index', # Если есть
         'rvc_f0_method': 'rmvpe',
         'rvc_pitch_shift': 0,
         'rvc_index_rate': 0.6 
@@ -82,10 +81,10 @@ async def generate_greeting(tts: TTSAdapter, bridge: PhoneBridgePort):
     # Мы говорим LLM, что именно сейчас происходит.
     # Это "скрытая режиссерская указание".
     scenario_prompt = (
-        "CONTEXT: You just called the new night guard (the user). "
-        "TASK: Start the call with your signature stuttering greeting ('Uh, hello, hello?'). "
-        "Then, briefly say you wanted to record a message for him to help him get settled in on his first night. "
-        "Keep it under 20 words. Be nervous."
+        "You are Phone Guy from Five Nights at Freddy's. You just called the new night guard to talk. "
+        "Start the conversation naturally with your signature stuttering greeting. "
+        "Talk about whatever comes to mind - the job, the animatronics, or just check how they're doing. "
+        "Be nervous and stutter occasionally. Keep it under 40 words."
     )
     
     logger.info("🤔 AI thinking about greeting...")
