@@ -4,168 +4,170 @@ import os
 import sys
 from dotenv import load_dotenv
 
-# Проверка зависимостей перед запуском
+# Проверки библиотек... (оставил ваш код)
 try:
     import torch
     print(f"✓ PyTorch {torch.__version__} detected")
 except ImportError:
     print("❌ ERROR: PyTorch not found!")
-    print("Please run the application using the virtual environment:")
-    print("  source /home/user/Test_Phone_new/.venv/bin/activate")
-    print("  python new_voip/main_integration.py")
     sys.exit(1)
 
 try:
     from rvc_py.rvc_infer import rvc_infer
     print("✓ RVC module imported successfully")
-except ImportError as e:
-    print(f"❌ ERROR: RVC module import failed: {e}")
-    print("Please run the application using the virtual environment:")
-    print("  source /home/user/Test_Phone_new/.venv/bin/activate")
-    print("  python new_voip/main_integration.py")
-    sys.exit(1)
+except ImportError:
+    pass
 
-# Импортируем "слонов"
 from stt_adapter import STTAdapter
 from tts_adapter import TTSAdapter
 from ai_service import phoneguy_reply
-
-# Импортируем нашу сеть и мост
 from sip_rtp_client import SIPClient
 from bridge import PhoneBridgePort
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("PhoneBot")
 
-# Конфиг для адаптеров (заглушка, подставьте свои значения)
+# === НАСТРОЙКИ ===
+SIP_USER = "555533"
+SIP_PASS = "Test1234"
+SIP_SERVER = "192.168.1.176"
+LOCAL_IP = "192.168.1.181"
+
+# !!! ВАЖНО !!!
+# Если хотите, чтобы бот ЖДАЛ звонка -> оставьте TARGET_NUMBER = None
+# Если хотите, чтобы бот ЗВОНИЛ сам -> напишите номер "1001"
+TARGET_NUMBER = None  # <--- РЕЖИМ ОЖИДАНИЯ ВХОДЯЩЕГО
+
+# Ваш конфиг...
 MOCK_CONFIG = {
     'stt': {
-        'model': 'tiny',       # faster-whisper model
-        'device': 'cuda',       # или cuda
+        'model': 'tiny',
+        'device': 'cuda',
         'energy_threshold': 500,
         'target_sample_rate': 16000,
         'language': 'en'
     },
     'tts': {
         'engine': 'turbo',
-        'device': 'cuda',      # или cpu
+        'device': 'cuda',
         'language_id': 'en',
         'audio_prompt_path': "/home/user/Test_Phone_new/new_voip/models/RVC/PhoneGuyFNAF1/PhoneGuy_FNAF1_01.wav",
-          # === Настройки RVC ===
         'rvc_enabled': True,
-        'rvc_model_path': '/home/user/Test_Phone_new/new_voip/models/RVC/PhoneGuyFNAF1/PhoneGuyFNAF1_e1000_s22000.pth',        'rvc_index_path': '/home/user/Test_Phone_new/new_voip/models/RVC/PhoneGuyFNAFadded_IVF339_Flat_nprobe_1_PhoneGuyFNAF1_v2.index', # Если есть
+        'rvc_model_path': '/home/user/Test_Phone_new/new_voip/models/RVC/PhoneGuyFNAF1/PhoneGuyFNAF1_e1000_s22000.pth',
+        'rvc_index_path': '/home/user/Test_Phone_new/new_voip/models/RVC/PhoneGuyFNAFadded_IVF339_Flat_nprobe_1_PhoneGuyFNAF1_v2.index',
         'rvc_f0_method': 'rmvpe',
         'rvc_pitch_shift': 0,
         'rvc_index_rate': 0.6 
     }
 }
 
-# SIP Настройки
-SIP_USER = "555533"
-SIP_PASS = "Test1234"
-SIP_SERVER = "192.168.1.176"
-LOCAL_IP = "192.168.1.181"
-TARGET_NUMBER = "1001"
-
-async def generate_greeting(tts: TTSAdapter, bridge: PhoneBridgePort):
+async def generate_greeting(tts: TTSAdapter, bridge: PhoneBridgePort, inbound=False):
     """
-    Бот генерирует приветствие первым, инициируя разговор.
+    Бот здоровается. Сценарий зависит от того, кто позвонил.
     """
     logger.info("👋 Generating initial greeting...")
-    
-    # Пауза, чтобы юзер поднес телефон к уху
-    await asyncio.sleep(2.0)
+    await asyncio.sleep(1.5)
 
-    # === СЦЕНАРИЙ ДЛЯ ПЕРВОЙ ФРАЗЫ ===
-    # Мы говорим LLM, что именно сейчас происходит.
-    # Это "скрытая режиссерская указание".
-    scenario_prompt = (
-        "You are Phone Guy from Five Nights at Freddy's. You just called the new night guard to talk. "
-        "Start the conversation naturally with your signature stuttering greeting. "
-        "Talk about whatever comes to mind - the job, the animatronics, or just check how they're doing. "
-        "Be nervous and stutter occasionally. Keep it under 40 words."
-    )
-    
+    if inbound:
+        # Сценарий: Нам позвонили
+        scenario_prompt = (
+            "You are Phone Guy. Someone just called your office phone. "
+            "Answer the phone naturally with your signature stutter ('Uh, hello? Hello, hello?'). "
+            "Ask who is calling and why they are bothering you at night. Be slightly annoyed but polite."
+        )
+    else:
+        # Сценарий: Мы позвонили
+        scenario_prompt = (
+            "You are Phone Guy. You just called the new night guard. "
+            "Start with 'Uh, hello, hello?'. Say you wanted to record a message for them to help them get settled in."
+        )
+
     logger.info("🤔 AI thinking about greeting...")
-    # Отправляем этот сценарий в мозг
     greeting_text = await asyncio.to_thread(phoneguy_reply, scenario_prompt)
     logger.info(f"🤖 Initial Greeting: {greeting_text}")
-
-    # Озвучиваем
     await tts.speak(greeting_text, media_port=bridge)
 
-async def conversation_loop(stt: STTAdapter, tts: TTSAdapter, bridge: PhoneBridgePort):
+async def conversation_loop(stt: STTAdapter, tts: TTSAdapter, bridge: PhoneBridgePort, client: SIPClient):
     """Главный цикл разговора"""
     logger.info("🟢 Bot is listening...")
     
-    # Запускаем обработку очереди фреймов STT
-    asyncio.create_task(stt.consume_frame_queue())
+    # Очищаем очередь STT от старых фраз (если были)
+    while not stt.out_queue.empty():
+        stt.out_queue.get_nowait()
 
-    while True:
-        # 1. Ждем текст от STT
-        user_text = await stt.out_queue.get()
-        logger.info(f"🗣️ User said: {user_text}")
+    while client.in_call:
+        try:
+            # Ждем фразу с таймаутом, чтобы проверять статус звонка
+            user_text = await asyncio.wait_for(stt.out_queue.get(), timeout=1.0)
+            
+            logger.info(f"🗣️ User said: {user_text}")
+            if not user_text: continue
 
-        if not user_text: 
-            continue
+            logger.info("🤔 Thinking...")
+            ai_reply = await asyncio.to_thread(phoneguy_reply, user_text)
+            logger.info(f"🤖 AI Reply: {ai_reply}")
 
-        # 2. Отправляем в LLM (в отдельном потоке, т.к. может быть медленно)
-        logger.info("🤔 Thinking...")
-        ai_reply = await asyncio.to_thread(phoneguy_reply, user_text)
-        logger.info(f"🤖 AI Reply: {ai_reply}")
-
-        # 3. Синтезируем речь (TTS)
-        # Метод speak сам вызовет bridge.update_playback_data
-        await tts.speak(ai_reply, media_port=bridge)
+            await tts.speak(ai_reply, media_port=bridge)
         
-        # RTP сам заберет данные из bridge.buffer, когда они появятся
+        except asyncio.TimeoutError:
+            continue # Просто проверяем in_call и крутимся дальше
 
 async def main():
     load_dotenv()
-    
-    # 1. Инициализация Компонентов
     logger.info("Initializing AI Engines...")
     bridge = PhoneBridgePort()
-    
-    # STT (передаем media_port=None, т.к. мы будем кормить его вручную из RTP)
     stt = STTAdapter(MOCK_CONFIG, logger)
-    
-    # TTS
     tts = TTSAdapter(MOCK_CONFIG, logger)
-    if not await tts.check_health():
-        logger.error("TTS Failed to initialize")
-        return
+    if not await tts.check_health(): return
 
-    # 2. Инициализация SIP
-    # Передаем stt в клиент, чтобы RTP скармливал ему входящий звук
+    # Инициализация SIP
     client = SIPClient(SIP_USER, SIP_PASS, SIP_SERVER, LOCAL_IP, stt_adapter=stt)
-    client.set_audio_source(bridge) # RTP берет звук из моста (куда пишет TTS)
+    client.set_audio_source(bridge)
 
-    # Запуск SIP транспорта
     transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
         lambda: client,
-        local_addr=('0.0.0.0', 5060)
+        local_addr=('0.0.0.0', 5065)
     )
 
     try:
-        # 3. Регистрация и Звонок
+        # 1. Регистрация
         await client.register()
         await asyncio.sleep(1)
-
-        if client.registered:
-            logger.info(f"Calling {TARGET_NUMBER}...")
-            await client.invite(TARGET_NUMBER)
-            
-            # Запускаем цикл разговора параллельно
-            greeting_task = asyncio.create_task(generate_greeting(tts, bridge))
-            conversation_task = asyncio.create_task(conversation_loop(stt, tts, bridge))
-            
-            # Держим соединение (в реальном коде нужна обработка BYE от сервера)
-            while True:
-                await asyncio.sleep(1)
-        else:
+        if not client.registered:
             logger.error("Registration failed")
+            return
+
+        # Запускаем STT consumer
+        asyncio.create_task(stt.consume_frame_queue())
+
+        while True:
+            # === РЕЖИМ 1: Мы звоним (Outbound) ===
+            if TARGET_NUMBER:
+                logger.info(f"📞 Calling {TARGET_NUMBER}...")
+                await client.invite(TARGET_NUMBER)
+            
+            # === РЕЖИМ 2: Мы ждем (Inbound) ===
+            else:
+                logger.info("📞 Waiting for incoming call...")
+            
+            # Ждем пока поднимут трубку (или мы, или они)
+            await client.call_connected_event.wait()
+            logger.info("✅ Call Connected!")
+
+            # Генерируем приветствие (разное для входящих/исходящих)
+            is_inbound = (TARGET_NUMBER is None)
+            await generate_greeting(tts, bridge, inbound=is_inbound)
+
+            # Запускаем разговор
+            await conversation_loop(stt, tts, bridge, client)
+            
+            logger.info("Call ended. Resetting...")
+            # Если был исходящий, выходим (или можно сделать повторный звонок)
+            if TARGET_NUMBER:
+                break
+            
+            # Если входящий - цикл крутится, ждем следующего
+            client.call_connected_event.clear()
 
     except KeyboardInterrupt:
         logger.info("Stopping...")
