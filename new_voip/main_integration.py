@@ -115,26 +115,35 @@ async def prepare_incoming_greeting():
     logger.info("✅ Audio ready in buffer! Pickup the phone now.")
 
 async def conversation_loop(stt: STTAdapter, tts: TTSAdapter, bridge: PhoneBridgePort, client: SIPClient):
+    """Главный цикл разговора"""
     logger.info("🟢 Bot is listening...")
     
+    # Очищаем очередь STT
     while not stt.out_queue.empty():
         stt.out_queue.get_nowait()
 
     while client.in_call:
         try:
+            # Ждем фразу с таймаутом
             user_text = await asyncio.wait_for(stt.out_queue.get(), timeout=1.0)
-            if not user_text: continue
-
-            logger.info(f"🗣️ User: {user_text}")
             
-            # ЗАПИСЫВАЕМ ЮЗЕРА В ЛОГ
-            log_to_file("User", user_text)
+            # === ФИЛЬТР МУСОРА ===
+            # Если текст пустой или короче 2 символов (например "." или "a") - игнорируем
+            if not user_text or len(user_text.strip()) < 2:
+                continue
+                
+            logger.info(f"🗣️ User: {user_text}")
 
             logger.info("🤔 Thinking...")
+            
+            # Внимание: теперь phoneguy_reply может вернуть None, если решил промолчать
             ai_reply = await asyncio.to_thread(phoneguy_reply, user_text)
             
-            # ЗАПИСЫВАЕМ БОТА В ЛОГ
-            log_to_file("Phone Guy", ai_reply)
+            if not ai_reply:
+                # Если LLM вернула None (проигнорировала), просто слушаем дальше
+                continue
+                
+            logger.info(f"🤖 AI Reply: {ai_reply}")
 
             await tts.speak(ai_reply, media_port=bridge)
         

@@ -3,9 +3,10 @@ import rich.logging
 from dotenv import load_dotenv
 import os
 import re
+import random
+import asyncio
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from ai_config import DEFAULT_PROMPT
 
 # Настройка логирования
 logging.basicConfig(
@@ -18,9 +19,11 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# === КОНФИГУРАЦИЯ ПРОМПТА ===
-# Если у вас есть файл ai_config, можно импортировать оттуда.
-# Если нет, используем этот дефолтный промпт:
+# Импорт вашего промпта (или используем дефолтный)
+try:
+    from ai_config import DEFAULT_PROMPT
+except ImportError:
+    DEFAULT_PROMPT = "You are Phone Guy from FNAF. Be nervous and stutter."
 
 NVIDIA_API_BASE = os.getenv("NVIDIA_API_BASE")
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
@@ -34,10 +37,12 @@ if NVIDIA_API_KEY:
         llm = ChatNVIDIA(
             api_key=NVIDIA_API_KEY,
             base_url=NVIDIA_API_BASE if NVIDIA_API_BASE else None,
-            model=os.getenv("NVIDIA_MODEL", "meta/llama3-70b-instruct"), # Дефолтная модель если нет в env
-            temperature=1.5,
-            top_p=0.7,
-            max_tokens=1024,
+            model=os.getenv("NVIDIA_MODEL", "meta/llama3-70b-instruct"),
+            temperature=1.7, # Чуть поднял для креативности
+            top_p=0.9,
+            max_completion_tokens=1024,
+            # Увеличиваем таймаут на уровне запроса (если поддерживается библиотекой)
+            timeout=10.0, 
             extra_body={"chat_template_kwargs": {"thinking": True}}
         )
         logger.info(f"✅ NVIDIA API configured with model: {os.getenv('NVIDIA_MODEL')}")
@@ -52,48 +57,77 @@ SYSTEM_INSTRUCTIONS = DEFAULT_PROMPT
 # История диалога
 conversation_history = []
 
+# Фразы-заглушки на случай ошибок (чтобы не повторял одно и то же)
+FALLBACK_PHRASES = [
+    "Uh, hello? I think the signal is breaking up.",
+    "Uh, sorry, could you say that again? The radio is acting up.",
+    "Um, I didn't catch that. It's a bit loud in here.",
+    "[clear throat] Uh, are you still there?",
+    "Sorry, I got distracted for a second, uh, checking the cameras.",
+]
+
 def phoneguy_reply(user_text: str, ignore_system_instructions: bool = False) -> str:
     """
-    Генерирует ответ в стиле Phone Guy, используя историю переписки.
+    Генерирует ответ в стиле Phone Guy с механизмом Retry.
     """
     if not AI_ENABLED or not llm:
-        logger.warning("🤖 AI is disabled. Returning default response.")
         return "Uh, hello? Can you hear me? Something is wrong with the connection."
 
-    try:
-        # 1. Добавляем системный промпт (только если история пуста)
-        if not ignore_system_instructions and not conversation_history:
-            conversation_history.append(SystemMessage(content=SYSTEM_INSTRUCTIONS))
-        
-        # 2. Добавляем сообщение пользователя
-        conversation_history.append(HumanMessage(content=user_text))
+    # Фильтр совсем короткого мусора
+    if not user_text or len(user_text.strip()) < 2:
+        logger.info("Ignoring too short input.")
+        return None
 
-        # 3. Генерируем ответ
-        response = llm.invoke(conversation_history)
-        ai_response_text = response.content.strip() if response.content else ""
-        
-        # 4. Чистим текст от звездочек (действий в ролевой игре)
-        # Phone Guy только говорит, он не пишет *sighs* в аудио.
-        ai_response_text = re.sub(r'\*+[^\*]+\*+', '', ai_response_text).strip()
-        ai_response_text = re.sub(r'\s+', ' ', ai_response_text) 
-        
-        if not ai_response_text:
-            ai_response_text = "Uh, hello, hello? I think I lost you there."
+    # Добавляем историю
+    if not ignore_system_instructions and not conversation_history:
+        conversation_history.append(SystemMessage(content=SYSTEM_INSTRUCTIONS))
+    
+    # Добавляем сообщение пользователя ВРЕМЕННО (пока не подтвердим успех)
+    user_msg = HumanMessage(content=user_text)
+    conversation_history.append(user_msg)
 
-        # 5. Сохраняем ответ бота в историю
+    # === RETRY LOGIC ===
+    max_retries = 2
+    ai_response_text = ""
+
+    for attempt in range(max_retries):
+        try:
+            # invoke
+            response = llm.invoke(conversation_history)
+            raw_text = response.content.strip() if response.content else ""
+            
+            # Чистка
+            # Убираем звездочки *sigh*, но оставляем [tags]
+            clean_text = re.sub(r'\*+[^\*]+\*+', '', raw_text).strip()
+            clean_text = re.sub(r'\s+', ' ', clean_text)
+            
+            if clean_text:
+                ai_response_text = clean_text
+                break # Успех!
+            else:
+                logger.warning(f"⚠️ Empty response from LLM (Attempt {attempt+1}/{max_retries})")
+        
+        except Exception as e:
+            logger.error(f"❌ NVIDIA API Error (Attempt {attempt+1}): {e}")
+            if attempt < max_retries - 1:
+                import time
+                time.sleep(1) # Ждем секунду перед повтором
+
+    # Если после всех попыток пусто -> берем случайную заглушку
+    if not ai_response_text:
+        ai_response_text = random.choice(FALLBACK_PHRASES)
+        # Удаляем сообщение пользователя из истории, чтобы не портить контекст "глухотой"
+        conversation_history.pop() 
+    else:
+        # Если успех - сохраняем ответ бота
         conversation_history.append(AIMessage(content=ai_response_text))
 
-        # Ограничиваем память (последние 20 сообщений)
-        if len(conversation_history) > 20:
-            conversation_history[:] = conversation_history[-20:]
+    # Ограничиваем память
+    if len(conversation_history) > 20:
+        conversation_history[:] = conversation_history[-20:]
 
-        return ai_response_text
-
-    except Exception as e:
-        logger.error(f"❌ Error calling NVIDIA NIM: {e}", exc_info=True)
-        return "Uh, sorry, technical difficulties."
+    return ai_response_text
 
 def reset_conversation_history():
-    """Сброс памяти бота"""
     conversation_history.clear()
     logger.info("Conversation history reset.")
