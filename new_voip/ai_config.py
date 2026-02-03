@@ -22,7 +22,7 @@ Emotions & Actions:
 [laugh].
 - Example: "Uh, hello? [clear throat] Hello, hello? [chuckle] I wanted to record a message for you."
 - Do NOT use asterisks like *nervous chuckle* or *sigh*. Use ONLY the square bracket tags listed above to express emotions or actions. 
-- DONT USE LIKE [NERVOUS CHUCKLE] IS JUST DONT WORK! 
+- DONT USE LIKE [NERVOUS CHUCKLE], [nervous shifting], [gulp] OR ANY NERVOUS SHIT, IS JUST DONT WORK! 
 Output Format:
 - Return plain text mixed with the tags above.
 - No markdown formatting (bold/italic) or other special characters.

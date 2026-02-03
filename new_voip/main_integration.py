@@ -2,19 +2,18 @@ import asyncio
 import logging
 import os
 import sys
+import datetime
 from dotenv import load_dotenv
 
-# Проверки библиотек... (оставил ваш код)
+# Проверки (оставим как было)...
 try:
     import torch
     print(f"✓ PyTorch {torch.__version__} detected")
 except ImportError:
-    print("❌ ERROR: PyTorch not found!")
-    sys.exit(1)
-
+    pass
 try:
     from rvc_py.rvc_infer import rvc_infer
-    print("✓ RVC module imported successfully")
+    print("✓ RVC module imported")
 except ImportError:
     pass
 
@@ -32,16 +31,11 @@ SIP_USER = "555533"
 SIP_PASS = "Test1234"
 SIP_SERVER = "192.168.1.176"
 LOCAL_IP = "192.168.1.181"
+TARGET_NUMBER = None  # Ждем входящего
 
-# !!! ВАЖНО !!!
-# Если хотите, чтобы бот ЖДАЛ звонка -> оставьте TARGET_NUMBER = None
-# Если хотите, чтобы бот ЗВОНИЛ сам -> напишите номер "1001"
-TARGET_NUMBER = None  # <--- РЕЖИМ ОЖИДАНИЯ ВХОДЯЩЕГО
-
-# Ваш конфиг...
 MOCK_CONFIG = {
     'stt': {
-        'model': 'tiny',
+        'model': 'small',
         'device': 'cuda',
         'energy_threshold': 500,
         'target_sample_rate': 16000,
@@ -61,68 +55,107 @@ MOCK_CONFIG = {
     }
 }
 
-async def generate_greeting(tts: TTSAdapter, bridge: PhoneBridgePort, inbound=False):
-    """
-    Бот здоровается. Сценарий зависит от того, кто позвонил.
-    """
-    logger.info("👋 Generating initial greeting...")
-    await asyncio.sleep(1.5)
+# --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
+_tts_ref = None
+_bridge_ref = None
+_current_log_file = None # Путь к текущему файлу лога
 
-    if inbound:
-        # Сценарий: Нам позвонили
-        scenario_prompt = (
-            "You are Phone Guy. Someone just called your office phone. "
-            "Answer the phone naturally with your signature stutter ('Uh, hello? Hello, hello?'). "
-            "Ask who is calling and why they are bothering you at night. Be slightly annoyed but polite."
-        )
-    else:
-        # Сценарий: Мы позвонили
-        scenario_prompt = (
-            "You are Phone Guy. You just called the new night guard. "
-            "Start with 'Uh, hello, hello?'. Say you wanted to record a message for them to help them get settled in."
-        )
+def setup_logging_file():
+    """Создает новый файл лога для текущего звонка"""
+    global _current_log_file
+    
+    # Создаем папку logs если нет
+    if not os.path.exists("logs"):
+        os.makedirs("logs")
+    
+    # Имя файла: logs/call_YYYY-MM-DD_HH-MM-SS.txt
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    _current_log_file = f"logs/call_{timestamp}.txt"
+    
+    with open(_current_log_file, "w", encoding="utf-8") as f:
+        f.write(f"=== CALL STARTED AT {timestamp} ===\n\n")
+    
+    logger.info(f"📝 Chat log will be saved to: {_current_log_file}")
 
-    logger.info("🤔 AI thinking about greeting...")
-    greeting_text = await asyncio.to_thread(phoneguy_reply, scenario_prompt)
-    logger.info(f"🤖 Initial Greeting: {greeting_text}")
-    await tts.speak(greeting_text, media_port=bridge)
+def log_to_file(role, text):
+    """Записывает сообщение в файл"""
+    if not _current_log_file: return
+    
+    timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+    try:
+        with open(_current_log_file, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {role}: {text}\n")
+    except Exception as e:
+        logger.error(f"Failed to write logs: {e}")
+
+async def prepare_incoming_greeting():
+    """
+    Эта функция вызывается, когда телефон ЗВОНИТ (Ring).
+    """
+    # Создаем файл лога при начале звонка
+    setup_logging_file()
+    
+    logger.info("📞 PRE-GENERATING GREETING (While Ringing)...")
+    _bridge_ref.buffer.clear()
+    
+    scenario_prompt = (
+        "You are Phone Guy. Someone called your office. "
+        "Answer with your signature stutter ('Uh, hello? Hello, hello?'). "
+        "Ask who is this. Be nervous."
+    )
+    
+    logger.info("🤔 AI thinking...")
+    text = await asyncio.to_thread(phoneguy_reply, scenario_prompt)
+    logger.info(f"🤖 Generated: {text}")
+    
+    # ЗАПИСЫВАЕМ В ЛОГ
+    log_to_file("Phone Guy", text)
+    
+    await _tts_ref.speak(text, media_port=_bridge_ref)
+    logger.info("✅ Audio ready in buffer! Pickup the phone now.")
 
 async def conversation_loop(stt: STTAdapter, tts: TTSAdapter, bridge: PhoneBridgePort, client: SIPClient):
-    """Главный цикл разговора"""
     logger.info("🟢 Bot is listening...")
     
-    # Очищаем очередь STT от старых фраз (если были)
     while not stt.out_queue.empty():
         stt.out_queue.get_nowait()
 
     while client.in_call:
         try:
-            # Ждем фразу с таймаутом, чтобы проверять статус звонка
             user_text = await asyncio.wait_for(stt.out_queue.get(), timeout=1.0)
-            
-            logger.info(f"🗣️ User said: {user_text}")
             if not user_text: continue
+
+            logger.info(f"🗣️ User: {user_text}")
+            
+            # ЗАПИСЫВАЕМ ЮЗЕРА В ЛОГ
+            log_to_file("User", user_text)
 
             logger.info("🤔 Thinking...")
             ai_reply = await asyncio.to_thread(phoneguy_reply, user_text)
-            logger.info(f"🤖 AI Reply: {ai_reply}")
+            
+            # ЗАПИСЫВАЕМ БОТА В ЛОГ
+            log_to_file("Phone Guy", ai_reply)
 
             await tts.speak(ai_reply, media_port=bridge)
         
         except asyncio.TimeoutError:
-            continue # Просто проверяем in_call и крутимся дальше
+            continue
 
 async def main():
     load_dotenv()
-    logger.info("Initializing AI Engines...")
+    global _tts_ref, _bridge_ref
+
     bridge = PhoneBridgePort()
     stt = STTAdapter(MOCK_CONFIG, logger)
     tts = TTSAdapter(MOCK_CONFIG, logger)
     if not await tts.check_health(): return
+    
+    _tts_ref = tts
+    _bridge_ref = bridge
 
-    # Инициализация SIP
     client = SIPClient(SIP_USER, SIP_PASS, SIP_SERVER, LOCAL_IP, stt_adapter=stt)
     client.set_audio_source(bridge)
+    client.set_prepare_callback(prepare_incoming_greeting)
 
     transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
         lambda: client,
@@ -130,43 +163,27 @@ async def main():
     )
 
     try:
-        # 1. Регистрация
         await client.register()
-        await asyncio.sleep(1)
-        if not client.registered:
-            logger.error("Registration failed")
-            return
-
-        # Запускаем STT consumer
         asyncio.create_task(stt.consume_frame_queue())
 
         while True:
-            # === РЕЖИМ 1: Мы звоним (Outbound) ===
             if TARGET_NUMBER:
-                logger.info(f"📞 Calling {TARGET_NUMBER}...")
+                # Если мы звоним сами, создаем лог здесь
+                setup_logging_file()
                 await client.invite(TARGET_NUMBER)
-            
-            # === РЕЖИМ 2: Мы ждем (Inbound) ===
             else:
-                logger.info("📞 Waiting for incoming call...")
+                logger.info("📞 Waiting for call...")
             
-            # Ждем пока поднимут трубку (или мы, или они)
             await client.call_connected_event.wait()
-            logger.info("✅ Call Connected!")
-
-            # Генерируем приветствие (разное для входящих/исходящих)
-            is_inbound = (TARGET_NUMBER is None)
-            await generate_greeting(tts, bridge, inbound=is_inbound)
-
-            # Запускаем разговор
+            
             await conversation_loop(stt, tts, bridge, client)
             
-            logger.info("Call ended. Resetting...")
-            # Если был исходящий, выходим (или можно сделать повторный звонок)
-            if TARGET_NUMBER:
-                break
-            
-            # Если входящий - цикл крутится, ждем следующего
+            logger.info("Call ended.")
+            if _current_log_file:
+                 with open(_current_log_file, "a", encoding="utf-8") as f:
+                    f.write("\n=== CALL ENDED ===\n")
+
+            if TARGET_NUMBER: break
             client.call_connected_event.clear()
 
     except KeyboardInterrupt:

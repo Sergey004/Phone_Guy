@@ -88,6 +88,9 @@ class SIPClient(asyncio.DatagramProtocol):
         self.rtp_protocol = None
         self.audio_source = None
         self.call_connected_event = asyncio.Event()
+        
+        # CALLBACK: Функция, которая будет вызвана во время Ringing
+        self.prepare_audio_callback = None
 
     def connection_made(self, transport):
         self.transport = transport
@@ -107,6 +110,10 @@ class SIPClient(asyncio.DatagramProtocol):
 
     def set_audio_source(self, source):
         self.audio_source = source
+
+    def set_prepare_callback(self, callback):
+        """Установка функции, которая готовит аудио во время гудков"""
+        self.prepare_audio_callback = callback
 
     def send_raw(self, msg, dest=None):
         target = dest if dest else (self.server_ip, 5060)
@@ -145,7 +152,6 @@ class SIPClient(asyncio.DatagramProtocol):
 
     async def _start_rtp(self, remote_ip, remote_port):
         if not self.audio_source: return
-        
         print(f"[SIP] Starting RTP -> {remote_ip}:{remote_port}")
         loop = asyncio.get_running_loop()
         _, protocol = await loop.create_datagram_endpoint(
@@ -172,16 +178,12 @@ class SIPClient(asyncio.DatagramProtocol):
         return msg
 
     def _build_180_ringing(self, lines):
-        # Строим пакет "Идет вызов" (чтобы у звонящего были гудки)
         via = self._extract_header(lines, "Via")
         from_hdr = self._extract_header(lines, "From")
         to_hdr = self._extract_header(lines, "To")
         call_id = self._extract_header(lines, "Call-ID")
         cseq = self._extract_header(lines, "CSeq")
-        
-        if "tag=" not in to_hdr:
-            to_hdr += f";tag={self.local_tag}"
-
+        if "tag=" not in to_hdr: to_hdr += f";tag={self.local_tag}"
         msg = f"SIP/2.0 180 Ringing\r\nVia: {via}\r\nFrom: {from_hdr}\r\nTo: {to_hdr}\r\nCall-ID: {call_id}\r\nCSeq: {cseq}\r\nContact: <sip:{self.username}@{self.local_ip}:{self.sip_port}>\r\nContent-Length: 0\r\n\r\n"
         return msg
 
@@ -240,63 +242,58 @@ class SIPClient(asyncio.DatagramProtocol):
             from_h = self._extract_header(lines, "From")
             if "tag=" in from_h: self.remote_tag = from_h.split("tag=")[1].split(";")[0]
 
-            # --- ШАГ 1: Отправляем 180 Ringing (Гудки) ---
+            # --- ШАГ 1: Гудки (180 Ringing) ---
             print("[SIP] Sending 180 Ringing...")
             self.send_raw(self._build_180_ringing(lines), dest=addr)
             
-            # --- ШАГ 2: Ждем (Имитация реакции человека) ---
-            wait_time = random.uniform(2.0, 4.0) # Задержка от 2 до 4 секунд
-            print(f"[SIP] Ringing for {wait_time:.1f}s...")
-            await asyncio.sleep(wait_time)
-            
-            # --- ШАГ 3: Поднимаем трубку (200 OK) ---
+            # --- ШАГ 2: Подготовка аудио (LLM+TTS) ---
+            # Мы вызываем колбэк и ЖДЕМ пока он выполнится.
+            # Звонящий в это время слышит гудки.
+            if self.prepare_audio_callback:
+                print("[SIP] Preparing AI greeting...")
+                await self.prepare_audio_callback()
+                print("[SIP] AI Greeting ready!")
+            else:
+                await asyncio.sleep(2) # Fallback, если колбэка нет
+
+            # --- ШАГ 3: Поднимаем трубку ---
             print("[SIP] Answering Call...")
             self.send_raw(self._build_200_ok(lines), dest=addr)
             
             rip, rport = self._parse_sdp(lines)
             await self._start_rtp(rip, rport)
 
-        # 3. AUTH
+        # (Остальные обработчики AUTH, OK, BYE остались как были)
         elif "401" in first or "407" in first:
             cseq_line = self._extract_header(lines, "CSeq")
             method = cseq_line.split()[1] if cseq_line else "REGISTER"
-            
-            nonce = ""
-            realm = ""
+            nonce, realm = "", ""
             auth_line = self._extract_header(lines, "WWW-Authenticate") or self._extract_header(lines, "Proxy-Authenticate")
             if auth_line:
                 for p in auth_line.split(','):
                     if 'nonce="' in p: nonce = p.split('nonce="')[1].split('"')[0]
                     if 'realm="' in p: realm = p.split('realm="')[1].split('"')[0]
-
             self.cseq += 1
             self.branch = "z9hG4bK" + ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
             uri = f"sip:{self.server_ip}" if method == "REGISTER" else f"sip:{self.current_target}@{self.server_ip}"
-            
             resp = self._generate_auth(nonce, realm, method, uri)
             auth_h = f'Authorization: Digest username="{self.username}", realm="{realm}", nonce="{nonce}", uri="{uri}", response="{resp}", algorithm=MD5'
-            
             if method == "REGISTER": self.send_raw(self._build_register_packet(auth_h))
             elif method == "INVITE": self.send_raw(self._build_invite_packet(self.current_target, auth_h))
-
-        # 4. REGISTER OK
+        
         elif "200 OK" in first and "REGISTER" in (self._extract_header(lines, "CSeq") or ""):
             if not self.registered: print("✅ [SIP] Registered Successfully!")
             self.registered = True
 
-        # 5. OUTBOUND CALL OK
         elif "200 OK" in first and "INVITE" in (self._extract_header(lines, "CSeq") or ""):
             print("✅ [SIP] Outbound Call Accepted")
             to_h = self._extract_header(lines, "To")
             if "tag=" in to_h: self.remote_tag = to_h.split("tag=")[1].split(";")[0]
-            
             ack = f"ACK sip:{self.current_target}@{self.server_ip} SIP/2.0\r\nVia: SIP/2.0/UDP {self.local_ip}:{self.sip_port};branch={self.branch}\r\nFrom: <sip:{self.username}@{self.server_ip}>;tag={self.local_tag}\r\nTo: {to_h}\r\nCall-ID: {self.call_id}\r\nCSeq: {self.cseq} ACK\r\nContent-Length: 0\r\n\r\n"
             self.send_raw(ack)
-            
             rip, rport = self._parse_sdp(lines)
             await self._start_rtp(rip, rport)
 
-        # 6. BYE
         elif "BYE" in first:
             print("📴 [SIP] Call Ended")
             self._stop_rtp()

@@ -7,47 +7,71 @@ class PhoneBridgePort(AudioSource):
     def __init__(self):
         self.buffer = bytearray()
         self.stats = {"duration_seconds": 0.0}
-        # Состояние ресемплера (нужно для потокового аудио, чтобы не было щелчков)
         self._resample_state = None
         self._last_sr = 0
+        
+        # === НАСТРОЙКИ ШУМА ===
+        # 0.0005 = ОЧЕНЬ ТИХО. 
+        # Достаточно, чтобы линия не "хлопала" в цифровую тишину,
+        # но недостаточно, чтобы вызвать эхо у собеседника.
+        self.noise_level = 0.0005 
+        self.bg_noise_buffer = self._generate_balanced_noise(duration=5.0)
+        self.bg_pos = 0
+
+    def _generate_balanced_noise(self, duration=5.0):
+        """
+        Генерирует очень тихий фоновый шум.
+        """
+        sample_rate = 8000
+        num_samples = int(sample_rate * duration)
+        
+        # 1. Белый шум
+        white = np.random.normal(0, 1, num_samples)
+        
+        # 2. Легкое сглаживание (Pink shift)
+        window_size = 2
+        window = np.ones(window_size) / window_size
+        filtered_noise = np.convolve(white, window, mode='same')
+        
+        # 3. Нормализация
+        max_val = np.max(np.abs(filtered_noise))
+        if max_val > 0:
+            filtered_noise = filtered_noise / max_val
+            
+        # 4. Применяем громкость
+        filtered_noise = filtered_noise * self.noise_level
+        
+        # 5. Конвертация в PCM 16-bit
+        noise_pcm = (filtered_noise * 32767).astype(np.int16)
+        
+        # 6. В A-Law
+        return audioop.lin2alaw(noise_pcm.tobytes(), 2)
 
     def update_playback_data(self, pcm_bytes: bytes, sample_rate=24000, validate=True):
-        """
-        Принимает PCM данные и их частоту (sample_rate).
-        Автоматически ресемплит всё в 8000 Hz для телефона.
-        """
         if not pcm_bytes:
             return False
             
         try:
-            # 1. Проверка четности байт (критично для 16-bit PCM)
             if len(pcm_bytes) % 2 != 0:
                 pcm_bytes = pcm_bytes[:-1]
 
-            # 2. Если частота изменилась (например, другая модель), сбрасываем состояние
             if sample_rate != self._last_sr:
                 self._resample_state = None
                 self._last_sr = sample_rate
 
-            # 3. Ресемплинг (Dynamic -> 8000)
             if sample_rate != 8000:
-                # audioop.ratecv(fragment, width, nchannels, in_rate, out_rate, state, weightA=1, weightB=0)
-                # width=2 (16-bit), channels=1 (Mono)
                 pcm_8k, self._resample_state = audioop.ratecv(
                     pcm_bytes, 2, 1, sample_rate, 8000, self._resample_state
                 )
             else:
                 pcm_8k = pcm_bytes
             
-            # 4. Проверка четности после ресемплинга
             if len(pcm_8k) % 2 != 0:
                 pcm_8k = pcm_8k[:-1]
 
-            # 5. Конвертация в G.711 A-Law (телефонный стандарт)
             alaw = audioop.lin2alaw(pcm_8k, 2)
             self.buffer.extend(alaw)
             
-            # Статистика
             samples = len(pcm_bytes) / 2
             self.stats["duration_seconds"] += samples / sample_rate
             return True
@@ -60,9 +84,25 @@ class PhoneBridgePort(AudioSource):
 
     def get_frame(self, samples_needed: int) -> bytes:
         bytes_needed = samples_needed
+        
         if len(self.buffer) >= bytes_needed:
             chunk = self.buffer[:bytes_needed]
             del self.buffer[:bytes_needed]
             return bytes(chunk)
         else:
-            return b'\xd5' * bytes_needed
+            if self.buffer:
+                self.buffer.clear()
+            
+            start = self.bg_pos
+            end = self.bg_pos + bytes_needed
+            
+            if end > len(self.bg_noise_buffer):
+                chunk = self.bg_noise_buffer[start:]
+                remaining = bytes_needed - len(chunk)
+                chunk += self.bg_noise_buffer[:remaining]
+                self.bg_pos = remaining
+            else:
+                chunk = self.bg_noise_buffer[start:end]
+                self.bg_pos = end
+            
+            return chunk
