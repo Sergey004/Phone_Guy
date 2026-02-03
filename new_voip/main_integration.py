@@ -5,7 +5,7 @@ import sys
 import datetime
 from dotenv import load_dotenv
 
-# Проверки (оставим как было)...
+# Проверки библиотек
 try:
     import torch
     print(f"✓ PyTorch {torch.__version__} detected")
@@ -31,11 +31,13 @@ SIP_USER = "555533"
 SIP_PASS = "Test1234"
 SIP_SERVER = "192.168.1.176"
 LOCAL_IP = "192.168.1.181"
-TARGET_NUMBER = None  # Ждем входящего
+
+# None = Ждем звонка. "1001" = Звоним сами.
+TARGET_NUMBER = None 
 
 MOCK_CONFIG = {
     'stt': {
-        'model': 'small',
+        'model': 'tiny',
         'device': 'cuda',
         'energy_threshold': 500,
         'target_sample_rate': 16000,
@@ -55,20 +57,18 @@ MOCK_CONFIG = {
     }
 }
 
-# --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
+# --- ЛОГИРОВАНИЕ ---
 _tts_ref = None
 _bridge_ref = None
-_current_log_file = None # Путь к текущему файлу лога
+_current_log_file = None
 
 def setup_logging_file():
     """Создает новый файл лога для текущего звонка"""
     global _current_log_file
     
-    # Создаем папку logs если нет
     if not os.path.exists("logs"):
         os.makedirs("logs")
     
-    # Имя файла: logs/call_YYYY-MM-DD_HH-MM-SS.txt
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     _current_log_file = f"logs/call_{timestamp}.txt"
     
@@ -90,9 +90,10 @@ def log_to_file(role, text):
 
 async def prepare_incoming_greeting():
     """
-    Эта функция вызывается, когда телефон ЗВОНИТ (Ring).
+    Вызывается, когда телефон звонит (Ring).
+    Генерирует приветствие и сохраняет его в лог.
     """
-    # Создаем файл лога при начале звонка
+    # 1. Создаем файл лога
     setup_logging_file()
     
     logger.info("📞 PRE-GENERATING GREETING (While Ringing)...")
@@ -108,42 +109,39 @@ async def prepare_incoming_greeting():
     text = await asyncio.to_thread(phoneguy_reply, scenario_prompt)
     logger.info(f"🤖 Generated: {text}")
     
-    # ЗАПИСЫВАЕМ В ЛОГ
+    # 2. Пишем приветствие в лог
     log_to_file("Phone Guy", text)
     
     await _tts_ref.speak(text, media_port=_bridge_ref)
     logger.info("✅ Audio ready in buffer! Pickup the phone now.")
 
 async def conversation_loop(stt: STTAdapter, tts: TTSAdapter, bridge: PhoneBridgePort, client: SIPClient):
-    """Главный цикл разговора"""
     logger.info("🟢 Bot is listening...")
     
-    # Очищаем очередь STT
     while not stt.out_queue.empty():
         stt.out_queue.get_nowait()
 
     while client.in_call:
         try:
-            # Ждем фразу с таймаутом
             user_text = await asyncio.wait_for(stt.out_queue.get(), timeout=1.0)
             
-            # === ФИЛЬТР МУСОРА ===
-            # Если текст пустой или короче 2 символов (например "." или "a") - игнорируем
+            # Фильтр мусора
             if not user_text or len(user_text.strip()) < 2:
                 continue
-                
+
             logger.info(f"🗣️ User: {user_text}")
+            
+            # 3. Пишем юзера в лог
+            log_to_file("User", user_text)
 
             logger.info("🤔 Thinking...")
-            
-            # Внимание: теперь phoneguy_reply может вернуть None, если решил промолчать
             ai_reply = await asyncio.to_thread(phoneguy_reply, user_text)
             
             if not ai_reply:
-                # Если LLM вернула None (проигнорировала), просто слушаем дальше
                 continue
-                
-            logger.info(f"🤖 AI Reply: {ai_reply}")
+
+            # 4. Пишем бота в лог
+            log_to_file("Phone Guy", ai_reply)
 
             await tts.speak(ai_reply, media_port=bridge)
         
@@ -166,6 +164,7 @@ async def main():
     client.set_audio_source(bridge)
     client.set_prepare_callback(prepare_incoming_greeting)
 
+    # ВАЖНО: Порт 5065
     transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
         lambda: client,
         local_addr=('0.0.0.0', 5065)
@@ -177,9 +176,14 @@ async def main():
 
         while True:
             if TARGET_NUMBER:
-                # Если мы звоним сами, создаем лог здесь
+                # Если звоним сами - создаем лог здесь
                 setup_logging_file()
+                
                 await client.invite(TARGET_NUMBER)
+                
+                # Приветствие для исходящего (опционально, можно добавить)
+                # ...
+                
             else:
                 logger.info("📞 Waiting for call...")
             
@@ -188,8 +192,10 @@ async def main():
             await conversation_loop(stt, tts, bridge, client)
             
             logger.info("Call ended.")
+            
+            # Закрываем лог красиво
             if _current_log_file:
-                 with open(_current_log_file, "a", encoding="utf-8") as f:
+                with open(_current_log_file, "a", encoding="utf-8") as f:
                     f.write("\n=== CALL ENDED ===\n")
 
             if TARGET_NUMBER: break

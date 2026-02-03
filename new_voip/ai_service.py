@@ -37,7 +37,7 @@ if NVIDIA_API_KEY:
         llm = ChatNVIDIA(
             api_key=NVIDIA_API_KEY,
             base_url=NVIDIA_API_BASE if NVIDIA_API_BASE else None,
-            model=os.getenv("NVIDIA_MODEL", "meta/llama3-70b-instruct"),
+            model=os.getenv("NVIDIA_MODEL", "z-ai/glm4.7"),
             temperature=1.7, # Чуть поднял для креативности
             top_p=0.9,
             max_completion_tokens=1024,
