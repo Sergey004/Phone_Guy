@@ -26,7 +26,7 @@ An AI-powered voice bot that simulates Phone Guy from Five Nights at Freddy's, c
 
 ### Software
 - **OS**: Linux (Ubuntu 22.04+ recommended) or Windows
-- **Python**: 3.11+
+- **Python**: 3.11 (And only 3.11)
 - **SIP Server**: PBX server (Asterisk, FreeSWITCH, etc.) or SIP provider
 
 ## 🚀 Installation
