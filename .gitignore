@@ -34,3 +34,4 @@ pyVoIP/
 .pytest_cache/
 new_voip/models/
 logs/
+chroma_db/
