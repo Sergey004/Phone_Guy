@@ -28,7 +28,9 @@ from chatterbox.tts import ChatterboxTTS
 from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 from chatterbox.tts_turbo import ChatterboxTurboTTS
 
-logging.getLogger('numba').setLevel(logging.WARNING)
+logging.getLogger('numba').setLevel(logging.ERROR)
+logging.getLogger('numba.core.byteflow').setLevel(logging.ERROR)
+
 
 class TTSAdapter:
     def __init__(self, config: dict, logger: logging.Logger):
@@ -40,6 +42,7 @@ class TTSAdapter:
         self.device = tts_cfg.get('device', 'cuda')
         self.language_id = tts_cfg.get('language_id')
         self.audio_prompt_path = tts_cfg.get('audio_prompt_path')
+        self.cfg_weight = "0.3"
         
         self._speak_lock = asyncio.Lock()
         self._model = None
@@ -88,9 +91,9 @@ class TTSAdapter:
             # 1. Генерация TTS (обычно 24k или 16k)
             def _generate():
                 if isinstance(model, ChatterboxMultilingualTTS) and self.language_id:
-                    return model.generate(text, language_id=self.language_id, audio_prompt_path=self.audio_prompt_path)
+                    return model.generate(text, language_id=self.language_id, audio_prompt_path=self.audio_prompt_path, cfg_weight=0.3,exaggeration=0.8)
                 else:
-                    return model.generate(text, audio_prompt_path=self.audio_prompt_path)
+                    return model.generate(text, audio_prompt_path=self.audio_prompt_path, cfg_weight=0.3)
 
             wav = await asyncio.get_event_loop().run_in_executor(None, _generate)
             sr = getattr(model, 'sr', 16000)

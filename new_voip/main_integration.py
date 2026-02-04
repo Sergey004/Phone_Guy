@@ -172,7 +172,7 @@ async def main():
     
     # Переиндексация документов (если нужно обновить базу)
     if rag_processor:
-        rag_processor.reindex_documents()
+        rag_processor.index_documents()
     
     try:
         await client.register()
