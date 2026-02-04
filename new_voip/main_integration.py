@@ -19,7 +19,7 @@ except ImportError:
 
 from stt_adapter import STTAdapter
 from tts_adapter import TTSAdapter
-from ai_service import phoneguy_reply
+from ai_service import phoneguy_reply, rag_processor
 from sip_rtp_client import SIPClient
 from bridge import PhoneBridgePort
 
@@ -151,7 +151,7 @@ async def conversation_loop(stt: STTAdapter, tts: TTSAdapter, bridge: PhoneBridg
 async def main():
     load_dotenv()
     global _tts_ref, _bridge_ref
-
+    
     bridge = PhoneBridgePort()
     stt = STTAdapter(MOCK_CONFIG, logger)
     tts = TTSAdapter(MOCK_CONFIG, logger)
@@ -169,7 +169,11 @@ async def main():
         lambda: client,
         local_addr=('0.0.0.0', 5065)
     )
-
+    
+    # Переиндексация документов (если нужно обновить базу)
+    if rag_processor:
+        rag_processor.reindex_documents()
+    
     try:
         await client.register()
         asyncio.create_task(stt.consume_frame_queue())
