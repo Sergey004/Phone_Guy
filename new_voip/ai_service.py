@@ -55,7 +55,7 @@ if NVIDIA_API_KEY:
             api_key=NVIDIA_API_KEY,
             base_url=NVIDIA_API_BASE if NVIDIA_API_BASE else None,
             model=os.getenv("NVIDIA_MODEL", "meta/llama3-70b-instruct"),
-            temperature=0.8,
+            temperature=1.7,
             top_p=0.9,
             max_tokens=1024,
             timeout=10.0,
