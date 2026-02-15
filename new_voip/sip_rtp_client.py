@@ -42,24 +42,19 @@ class RTPProtocol(asyncio.DatagramProtocol):
         while self.running:
             payload = self.audio_source.get_frame(SAMPLES_PER_FRAME)
             header = struct.pack('!BBHII', 0x80, 8, self.sequence, self.timestamp, self.ssrc)
-            
             if self.transport and not self.transport.is_closing():
                 self.transport.sendto(header + payload, (self.dest_ip, self.dest_port))
             else:
                 break
-            
             self.sequence = (self.sequence + 1) % 65535
             self.timestamp = (self.timestamp + SAMPLES_PER_FRAME) % 4294967295
-            
             next_time += (FRAME_MS / 1000.0)
             delay = next_time - time.time()
-            if delay > 0:
-                await asyncio.sleep(delay)
+            if delay > 0: await asyncio.sleep(delay)
 
     def stop(self):
         self.running = False
-        if self.transport:
-            self.transport.close()
+        if self.transport: self.transport.close()
 
 
 class SIPClient(asyncio.DatagramProtocol):
@@ -85,11 +80,11 @@ class SIPClient(asyncio.DatagramProtocol):
         self.registered = False
         self.in_call = False
         self.current_target = None
+        self.remote_number = None # <-- НОВОЕ ПОЛЕ: КТО НАМ ЗВОНИТ
+        
         self.rtp_protocol = None
         self.audio_source = None
         self.call_connected_event = asyncio.Event()
-        
-        # CALLBACK: Функция, которая будет вызвана во время Ringing
         self.prepare_audio_callback = None
 
     def connection_made(self, transport):
@@ -108,17 +103,12 @@ class SIPClient(asyncio.DatagramProtocol):
                 await self.register()
             await asyncio.sleep(45)
 
-    def set_audio_source(self, source):
-        self.audio_source = source
-
-    def set_prepare_callback(self, callback):
-        """Установка функции, которая готовит аудио во время гудков"""
-        self.prepare_audio_callback = callback
+    def set_audio_source(self, source): self.audio_source = source
+    def set_prepare_callback(self, callback): self.prepare_audio_callback = callback
 
     def send_raw(self, msg, dest=None):
         target = dest if dest else (self.server_ip, 5060)
-        if self.transport:
-            self.transport.sendto(msg.encode(), target)
+        if self.transport: self.transport.sendto(msg.encode(), target)
 
     async def register(self):
         req = self._build_register_packet()
@@ -127,6 +117,7 @@ class SIPClient(asyncio.DatagramProtocol):
     async def invite(self, target_number):
         print(f"[SIP] Calling outbound -> {target_number}")
         self.current_target = target_number
+        self.remote_number = target_number # Запоминаем, кому звоним
         self.cseq += 1
         self.call_connected_event.clear()
         req = self._build_invite_packet(target_number)
@@ -136,10 +127,8 @@ class SIPClient(asyncio.DatagramProtocol):
         print("[SIP] Sending BYE")
         self.cseq += 1
         target = self.current_target if self.current_target else self.username
-        
         to_hdr = f"<sip:{target}@{self.server_ip}>"
         if self.remote_tag: to_hdr += f";tag={self.remote_tag}"
-
         msg = f"BYE sip:{target}@{self.server_ip} SIP/2.0\r\nVia: SIP/2.0/UDP {self.local_ip}:{self.sip_port};branch={self.branch}\r\nFrom: <sip:{self.username}@{self.server_ip}>;tag={self.local_tag}\r\nTo: {to_hdr}\r\nCall-ID: {self.call_id}\r\nCSeq: {self.cseq} BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
         self.send_raw(msg)
         self._stop_rtp()
@@ -162,7 +151,20 @@ class SIPClient(asyncio.DatagramProtocol):
         self.in_call = True
         self.call_connected_event.set()
 
-    # --- Builders ---
+    # --- Helpers ---
+    def _extract_header(self, lines, name):
+        name = name.lower()
+        for line in lines:
+            if line.lower().startswith(name + ":"): return line[len(name)+1:].strip()
+        return None
+
+    def _extract_number_from_uri(self, uri):
+        """Парсит sip:1001@ip"""
+        try:
+            if "sip:" in uri: return uri.split("sip:")[1].split("@")[0]
+            return "unknown"
+        except: return "unknown"
+
     def _build_register_packet(self, auth=None):
         msg = f"REGISTER sip:{self.server_ip} SIP/2.0\r\nVia: SIP/2.0/UDP {self.local_ip}:{self.sip_port};branch={self.branch};rport\r\nFrom: <sip:{self.username}@{self.server_ip}>;tag={self.local_tag}\r\nTo: <sip:{self.username}@{self.server_ip}>\r\nCall-ID: {self.call_id}\r\nCSeq: {self.cseq} REGISTER\r\nContact: <sip:{self.username}@{self.local_ip}:{self.sip_port}>\r\nMax-Forwards: 70\r\nUser-Agent: PhoneGuyBot/1.0\r\n"
         if auth: msg += f"{auth}\r\n"
@@ -184,8 +186,7 @@ class SIPClient(asyncio.DatagramProtocol):
         call_id = self._extract_header(lines, "Call-ID")
         cseq = self._extract_header(lines, "CSeq")
         if "tag=" not in to_hdr: to_hdr += f";tag={self.local_tag}"
-        msg = f"SIP/2.0 180 Ringing\r\nVia: {via}\r\nFrom: {from_hdr}\r\nTo: {to_hdr}\r\nCall-ID: {call_id}\r\nCSeq: {cseq}\r\nContact: <sip:{self.username}@{self.local_ip}:{self.sip_port}>\r\nContent-Length: 0\r\n\r\n"
-        return msg
+        return f"SIP/2.0 180 Ringing\r\nVia: {via}\r\nFrom: {from_hdr}\r\nTo: {to_hdr}\r\nCall-ID: {call_id}\r\nCSeq: {cseq}\r\nContact: <sip:{self.username}@{self.local_ip}:{self.sip_port}>\r\nContent-Length: 0\r\n\r\n"
 
     def _build_200_ok(self, lines):
         via = self._extract_header(lines, "Via")
@@ -195,8 +196,7 @@ class SIPClient(asyncio.DatagramProtocol):
         cseq = self._extract_header(lines, "CSeq")
         if "tag=" not in to_hdr: to_hdr += f";tag={self.local_tag}"
         sdp = self._build_sdp()
-        msg = f"SIP/2.0 200 OK\r\nVia: {via}\r\nFrom: {from_hdr}\r\nTo: {to_hdr}\r\nCall-ID: {call_id}\r\nCSeq: {cseq}\r\nContact: <sip:{self.username}@{self.local_ip}:{self.sip_port}>\r\nContent-Type: application/sdp\r\nContent-Length: {len(sdp)}\r\n\r\n{sdp}"
-        return msg
+        return f"SIP/2.0 200 OK\r\nVia: {via}\r\nFrom: {from_hdr}\r\nTo: {to_hdr}\r\nCall-ID: {call_id}\r\nCSeq: {cseq}\r\nContact: <sip:{self.username}@{self.local_ip}:{self.sip_port}>\r\nContent-Type: application/sdp\r\nContent-Length: {len(sdp)}\r\n\r\n{sdp}"
 
     def _build_sdp(self):
         return f"v=0\r\no=- {self.sess_id} {self.sess_version} IN IP4 {self.local_ip}\r\ns=-\r\nc=IN IP4 {self.local_ip}\r\nt=0 0\r\nm=audio {self.rtp_port} RTP/AVP 8 0\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n"
@@ -205,12 +205,6 @@ class SIPClient(asyncio.DatagramProtocol):
         ha1 = hashlib.md5(f"{self.username}:{realm}:{self.password}".encode()).hexdigest()
         ha2 = hashlib.md5(f"{method}:{uri}".encode()).hexdigest()
         return hashlib.md5(f"{ha1}:{nonce}:{ha2}".encode()).hexdigest()
-
-    def _extract_header(self, lines, name):
-        name = name.lower()
-        for line in lines:
-            if line.lower().startswith(name + ":"): return line[len(name)+1:].strip()
-        return None
 
     def _parse_sdp(self, lines):
         ip = self.server_ip
@@ -225,7 +219,6 @@ class SIPClient(asyncio.DatagramProtocol):
         if not lines: return
         first = lines[0]
         
-        # 1. OPTIONS (PING)
         if first.startswith("OPTIONS"):
             via = self._extract_header(lines, "Via")
             from_h = self._extract_header(lines, "From")
@@ -235,35 +228,30 @@ class SIPClient(asyncio.DatagramProtocol):
             response = f"SIP/2.0 200 OK\r\nVia: {via}\r\nFrom: {from_h}\r\nTo: {to_h}\r\nCall-ID: {call_id}\r\nCSeq: {cseq}\r\nContact: <sip:{self.username}@{self.local_ip}:{self.sip_port}>\r\nContent-Length: 0\r\n\r\n"
             self.send_raw(response, dest=addr)
 
-        # 2. INVITE (Входящий звонок)
         elif first.startswith("INVITE"):
             print(f"🔔 [SIP] Incoming Call from {addr}")
             self.call_id = self._extract_header(lines, "Call-ID")
             from_h = self._extract_header(lines, "From")
             if "tag=" in from_h: self.remote_tag = from_h.split("tag=")[1].split(";")[0]
+            
+            # --- ИЗВЛЕКАЕМ НОМЕР ---
+            self.remote_number = self._extract_number_from_uri(from_h)
+            print(f"📞 Identified Remote Caller: {self.remote_number}")
 
-            # --- ШАГ 1: Гудки (180 Ringing) ---
             print("[SIP] Sending 180 Ringing...")
             self.send_raw(self._build_180_ringing(lines), dest=addr)
             
-            # --- ШАГ 2: Подготовка аудио (LLM+TTS) ---
-            # Мы вызываем колбэк и ЖДЕМ пока он выполнится.
-            # Звонящий в это время слышит гудки.
             if self.prepare_audio_callback:
                 print("[SIP] Preparing AI greeting...")
-                await self.prepare_audio_callback()
-                print("[SIP] AI Greeting ready!")
+                await self.prepare_audio_callback() # Ждем генерации
             else:
-                await asyncio.sleep(2) # Fallback, если колбэка нет
+                await asyncio.sleep(2)
 
-            # --- ШАГ 3: Поднимаем трубку ---
             print("[SIP] Answering Call...")
             self.send_raw(self._build_200_ok(lines), dest=addr)
-            
             rip, rport = self._parse_sdp(lines)
             await self._start_rtp(rip, rport)
 
-        # (Остальные обработчики AUTH, OK, BYE остались как были)
         elif "401" in first or "407" in first:
             cseq_line = self._extract_header(lines, "CSeq")
             method = cseq_line.split()[1] if cseq_line else "REGISTER"

@@ -23,21 +23,17 @@ logger = logging.getLogger("RAG")
 
 class DocumentProcessor:
     def __init__(self, doc_path: str = "knowledge_base", collection_name: str = "phoneguy_brain"):
-        # ИСПРАВЛЕНИЕ: Используем абсолютный путь от места запуска скрипта
-        # Это надежнее, чем вычислять через __file__
+        # Определяем пути от корня проекта
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # Если скрипт запущен из корня, корректируем
+        if os.path.basename(os.getcwd()) == "new_voip": # или имя вашей папки
+             project_root = os.getcwd()
+        
         self.doc_path = os.path.abspath(doc_path)
         
-        # 1. Сразу создаем папку, если её нет
-        try:
-            if not os.path.exists(self.doc_path):
-                os.makedirs(self.doc_path, exist_ok=True)
-                logger.info(f"📁 Created folder for documents: '{self.doc_path}'")
-            else:
-                logger.info(f"📁 Documents folder found: '{self.doc_path}'")
-        except Exception as e:
-            logger.error(f"❌ Failed to create folder: {e}")
+        if not os.path.exists(self.doc_path):
+            os.makedirs(self.doc_path, exist_ok=True)
         
-        # Проверяем ключ
         if not os.getenv("NVIDIA_API_KEY"):
             logger.warning("⚠️ No NVIDIA_API_KEY found. RAG will be disabled.")
             self.vector_store = None
@@ -56,46 +52,43 @@ class DocumentProcessor:
 
         self.persist_directory = os.path.abspath(f"chroma_db/{collection_name}")
         
-        # Инициализация ChromaDB
         try:
+            # Инициализация ChromaDB
             if os.path.exists(self.persist_directory) and os.listdir(self.persist_directory):
-                logger.info(f"📂 Loading existing knowledge base from {self.persist_directory}")
+                logger.info(f"📂 Loading DB: {collection_name}")
                 self.vector_store = Chroma(
                     persist_directory=self.persist_directory, 
                     collection_name=collection_name, 
                     embedding_function=self.embeddings
                 )
             else:
-                logger.info(f"🆕 Creating new knowledge base in {self.persist_directory}")
+                logger.info(f"🆕 Creating DB: {collection_name}")
                 self.vector_store = Chroma(
                     collection_name=collection_name, 
                     embedding_function=self.embeddings, 
                     persist_directory=self.persist_directory
                 )
-                self.index_documents()
+                # Индексируем только если это база знаний (а не база памяти юзеров)
+                if collection_name == "phoneguy_brain":
+                    self.index_documents()
         except Exception as e:
             logger.error(f"❌ Error initializing ChromaDB: {e}")
             self.vector_store = None
-            return
 
     def index_documents(self):
-        """Читает документы и добавляет в базу"""
+        """Читает файлы из папки и добавляет в базу"""
         if self.vector_store is None: return
-        logger.info(f"🔍 Starting indexing form: {self.doc_path}")
+        logger.info(f"🔍 Indexing docs from: {self.doc_path}")
 
         documents = []
-        # Расширенный список форматов
         loaders = {
-            '.pdf': PyPDFLoader,
-            '.txt': TextLoader,
-            '.md': UnstructuredMarkdownLoader
+            '.pdf': PyPDFLoader, '.txt': TextLoader, '.md': UnstructuredMarkdownLoader
         }
         
         for filename in os.listdir(self.doc_path):
             ext = os.path.splitext(filename)[1].lower()
             if ext in loaders:
                 filepath = os.path.join(self.doc_path, filename)
-                logger.info(f"📖 Reading: {filename}")
                 try:
                     loader = loaders[ext](filepath)
                     documents.extend(loader.load())
@@ -108,31 +101,45 @@ class DocumentProcessor:
 
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
         chunks = text_splitter.split_documents(documents)
-        logger.info(f"🧩 Split into {len(chunks)} chunks.")
         
-        # Пакетное добавление (стабильнее)
         batch_size = 10
         for i in range(0, len(chunks), batch_size):
             batch = chunks[i:i + batch_size]
-            try:
-                self.vector_store.add_documents(batch)
-            except Exception as e:
-                logger.error(f"Error adding batch {i}: {e}")
+            self.vector_store.add_documents(batch)
                 
-        logger.info("✅ Indexing complete.")
+        logger.info(f"✅ Indexed {len(chunks)} chunks.")
 
-    def retrieve_documents(self, query: str, k: int = 2) -> str:
-        if not self.vector_store or not query:
-            return ""
+    def add_memory(self, text: str, metadata: dict):
+        """Сохраняет воспоминание о звонке"""
+        if not self.vector_store: return
+        try:
+            doc = Document(page_content=text, metadata=metadata)
+            self.vector_store.add_documents([doc])
+            logger.info(f"💾 Memory saved for {metadata.get('caller_id')}")
+        except Exception as e:
+            logger.error(f"❌ Failed to save memory: {e}")
+
+    def retrieve_documents(self, query: str, k: int = 2, filter_meta: dict = None) -> str:
+        """Поиск с возможностью фильтрации по метаданным"""
+        if not self.vector_store or not query: return ""
         
         try:
-            logger.info(f"🔍 RAG Search: '{query}'")
-            docs = self.vector_store.similarity_search(query, k=k)
+            # Если передан фильтр (например caller_id), ищем только по нему
+            docs = self.vector_store.similarity_search(query, k=k, filter=filter_meta)
             if not docs: return ""
             
-            # Формируем красивый контекст
-            context = "\n".join([f"- {d.page_content}" for d in docs])
-            return context
+            context_parts = []
+            for d in docs:
+                # Если это память о юзере
+                if 'caller_id' in d.metadata:
+                    date = d.metadata.get('timestamp', '')[:10]
+                    context_parts.append(f"[MEMORY {date}]: {d.page_content}")
+                # Если это документ компании
+                else:
+                    src = os.path.basename(str(d.metadata.get('source', 'Unknown')))
+                    context_parts.append(f"[FILE {src}]: {d.page_content}")
+            
+            return "\n\n".join(context_parts)
         except Exception as e:
             logger.error(f"RAG Error: {e}")
             return ""

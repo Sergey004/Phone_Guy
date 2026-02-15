@@ -91,7 +91,7 @@ class TTSAdapter:
             # 1. Генерация TTS (обычно 24k или 16k)
             def _generate():
                 if isinstance(model, ChatterboxMultilingualTTS) and self.language_id:
-                    return model.generate(text, language_id=self.language_id, audio_prompt_path=self.audio_prompt_path, cfg_weight=0.3,exaggeration=0.8)
+                    return model.generate(text, language_id=self.language_id, audio_prompt_path=self.audio_prompt_path, cfg_weight=0.3)
                 else:
                     return model.generate(text, audio_prompt_path=self.audio_prompt_path, cfg_weight=0.3)
 
