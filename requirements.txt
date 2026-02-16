@@ -151,7 +151,7 @@ pydub==0.25.1
 Pygments==2.19.2
 pykakasi==2.3.0
 pyloudnorm==0.2.0
-pypdf==6.6.0
+pypdf==6.6.2
 PyPika==0.50.0
 pyproject_hooks==1.2.0
 pytest==9.0.2
