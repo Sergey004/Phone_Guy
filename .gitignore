@@ -36,3 +36,4 @@ new_voip/models/
 logs/
 chroma_db/
 knowledge_base/
+ai_core/models
