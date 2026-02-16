@@ -139,7 +139,7 @@ posthog==5.4.0
 praat-parselmouth==0.4.7
 pre_commit==4.5.1
 propcache==0.4.1
-protobuf==6.33.4
+protobuf==6.33.5
 psutil==7.2.2
 PyAudio==0.2.14
 pybase64==1.4.3
