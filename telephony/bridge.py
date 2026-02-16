@@ -1,7 +1,7 @@
 import asyncio
 import numpy as np
 import audioop
-from audio_engine import AudioSource
+from telephony.audio_engine import AudioSource
 
 class PhoneBridgePort(AudioSource):
     def __init__(self):

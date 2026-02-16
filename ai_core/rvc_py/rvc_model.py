@@ -10,7 +10,7 @@ except ImportError:
     faiss = None
     print("[WARN] faiss не установлен — retrieval blending будет недоступен.")
 
-from rvc_py.lib.infer_pack.models_dml import SynthesizerTrnMs256NSFsid, SynthesizerTrnMs256NSFsid_nono, SynthesizerTrnMs768NSFsid, SynthesizerTrnMs768NSFsid_nono
+from ai_core.rvc_py.lib.infer_pack.models_dml import SynthesizerTrnMs256NSFsid, SynthesizerTrnMs256NSFsid_nono, SynthesizerTrnMs768NSFsid, SynthesizerTrnMs768NSFsid_nono
 
 class RVCModel(nn.Module):
     def __init__(self, model_path, device='cpu', index_path=None, fp16=False, sample_rate=None):

@@ -8,16 +8,16 @@ import os
 import rich.logging
 
 # Настройка путей
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+project_root = os.path.abspath(os.path.dirname(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 try:
-    from rvc_py.rvc_infer import rvc_infer
+    from ai_core.rvc_py.rvc_infer import rvc_infer
 except ImportError:
     sys.path.append(os.path.join(project_root, 'rvc_py'))
     try:
-        from rvc_py.rvc_infer import rvc_infer
+        from ai_core.rvc_py.rvc_infer import rvc_infer
     except ImportError as e:
         print(f"[TTS] RVC import failed: {e}")
         rvc_infer = None

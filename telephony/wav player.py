@@ -1,6 +1,6 @@
 import asyncio
-from new_voip.sip_rtp_client import SIPClient
-from new_voip.audio_engine import FilePlayerSource
+from telephony.sip_rtp_client import SIPClient
+from telephony.audio_engine import FilePlayerSource
 
 # === НАСТРОЙКИ ===
 SIP_USER = "555533"          # Твой номер

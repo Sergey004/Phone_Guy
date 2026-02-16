@@ -5,6 +5,8 @@ import sys
 import datetime
 from dotenv import load_dotenv
 
+load_dotenv()
+
 # Проверки библиотек
 try:
     import torch
@@ -12,27 +14,25 @@ try:
 except ImportError:
     pass
 try:
-    from rvc_py.rvc_infer import rvc_infer
+    from ai_core.rvc_py.rvc_infer import rvc_infer
     print("✓ RVC module imported")
 except ImportError:
     pass
 
-from stt_adapter import STTAdapter
-from tts_adapter import TTSAdapter
-# Импортируем новые функции памяти
-from ai_service import phoneguy_reply, rag_processor, set_caller_context, summarize_and_save, reset_conversation_history
-from sip_rtp_client import SIPClient
-from bridge import PhoneBridgePort
+from ai_core.stt_adapter import STTAdapter
+from ai_core.tts_adapter import TTSAdapter
+from ai_core.ai_service import phoneguy_reply, rag_processor, set_caller_context, summarize_and_save, reset_conversation_history
+from telephony.sip_rtp_client import SIPClient
+from telephony.bridge import PhoneBridgePort
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("PhoneBot")
 
-# === НАСТРОЙКИ ===
-SIP_USER = "555533"
-SIP_PASS = "Test1234"
-SIP_SERVER = "192.168.1.176"
+SIP_USER = os.getenv('SIP_USER', '555533')
+SIP_PASS = os.getenv('SIP_PASSWORD', 'Test1234')
+SIP_SERVER = os.getenv('SIP_SERVER', '192.168.1.176:5060').split(':')[0]
 LOCAL_IP = "192.168.1.181"
-TARGET_NUMBER = None 
+TARGET_NUMBER = os.getenv('TARGET_NUMBER')
 
 MOCK_CONFIG = {
     'stt': {
@@ -43,16 +43,16 @@ MOCK_CONFIG = {
         'language': 'en'
     },
     'tts': {
-        'engine': 'turbo',
-        'device': 'cuda',
+        'engine': os.getenv('TTS_ENGINE', 'turbo'),
+        'device': os.getenv('TTS_DEVICE', 'cuda'),
         'language_id': 'en',
-        'audio_prompt_path': "/home/user/Test_Phone_new/new_voip/models/RVC/PhoneGuyFNAF1/PhoneGuy_FNAF1_01.wav",
-        'rvc_enabled': True,
-        'rvc_model_path': '/home/user/Test_Phone_new/new_voip/models/RVC/PhoneGuyFNAF1/PhoneGuyFNAF1_e1000_s22000.pth',
-        'rvc_index_path': '/home/user/Test_Phone_new/new_voip/models/RVC/PhoneGuyFNAFadded_IVF339_Flat_nprobe_1_PhoneGuyFNAF1_v2.index',
-        'rvc_f0_method': 'rmvpe',
-        'rvc_pitch_shift': 0,
-        'rvc_index_rate': 0.6 
+        'audio_prompt_path': os.getenv('AUDIO_PROMPT_PATH'),
+        'rvc_enabled': os.getenv('RVC_ENABLED', 'true').lower() == 'true',
+        'rvc_model_path': os.getenv('RVC_MODEL_PATH'),
+        'rvc_index_path': os.getenv('RVC_INDEX_PATH'),
+        'rvc_f0_method': os.getenv('RVC_F0_METHOD', 'rmvpe'),
+        'rvc_pitch_shift': int(os.getenv('RVC_PITCH_SHIFT', '0')),
+        'rvc_index_rate': float(os.getenv('RVC_INDEX_RATE', '0.6'))
     }
 }
 

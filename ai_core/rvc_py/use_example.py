@@ -1,6 +1,6 @@
 
     
-    from rvc_py.rvc_infer import rvc_infer
+    from ai_core.rvc_py.rvc_infer import rvc_infer
     if args.rvc_model:
         print(f"[INFO] Post-process через RVC: {args.rvc_model}")
         rvc_kwargs = dict(device=args.device)

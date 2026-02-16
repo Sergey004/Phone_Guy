@@ -23,12 +23,6 @@ logger = logging.getLogger("RAG")
 
 class DocumentProcessor:
     def __init__(self, doc_path: str = "knowledge_base", collection_name: str = "phoneguy_brain"):
-        # Определяем пути от корня проекта
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        # Если скрипт запущен из корня, корректируем
-        if os.path.basename(os.getcwd()) == "new_voip": # или имя вашей папки
-             project_root = os.getcwd()
-        
         self.doc_path = os.path.abspath(doc_path)
         
         if not os.path.exists(self.doc_path):

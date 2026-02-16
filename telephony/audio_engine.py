@@ -3,7 +3,7 @@ import numpy as np
 import wave
 import audioop
 from abc import ABC, abstractmethod
-from audio_codecs import AudioCodec
+from telephony.audio_codecs import AudioCodec
 
 class AudioSource(ABC):
     @abstractmethod
