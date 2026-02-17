@@ -20,7 +20,7 @@ An AI-powered voice bot that simulates Phone Guy from Five Nights at Freddy's, c
 ## 📋 System Requirements
 
 ### Hardware
-- **GPU**: NVIDIA GPU with CUDA support (recommended for RVC and TTS)
+- **GPU**: NVIDIA GPU with CUDA support and 12+ GB of VRAM (recommended for RVC and TTS)
 - **RAM**: Minimum 8GB, 16GB+ recommended
 - **Storage**: 5GB+ free space for models
 
@@ -29,7 +29,7 @@ An AI-powered voice bot that simulates Phone Guy from Five Nights at Freddy's, c
 - **Python**: 3.11 (And only 3.11)
 - **SIP Server**: PBX server (Asterisk, FreeSWITCH, etc.) or SIP provider
 
-Tested on Ubuntu 22.04 and FreePBX (Asterisk 22)
+Tested on Ubuntu 24.04 + RTX 3090 and FreePBX (Asterisk 22)
 
 ## 🚀 Installation
 
