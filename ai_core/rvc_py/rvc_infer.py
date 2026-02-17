@@ -43,7 +43,7 @@ def rvc_infer(
         if hubert_path is None:
             hubert_path = os.path.join(models_dir, 'hubert_base.pt')
         if not os.path.exists(hubert_path):
-            print(f"[RVC] HuBERT не найден, скачиваем автоматически...")
+            print("[RVC] HuBERT не найден, скачиваем автоматически...")
             hubert_path = download_model('hubert_base.pt', out_dir=models_dir)
         print(f"[RVC] Загрузка HuBERT (ContentVec): {hubert_path}")
         hubert = Hubert(hubert_path, device=device)
@@ -85,7 +85,7 @@ def rvc_infer(
         if rmvpe_model_path is None:
             rmvpe_model_path = os.path.join(models_dir, 'rmvpe.pt')
         if not os.path.exists(rmvpe_model_path):
-            print(f"[RVC] RMVPE не найден, скачиваем автоматически...")
+            print("[RVC] RMVPE не найден, скачиваем автоматически...")
             rmvpe_model_path = download_model('rmvpe.pt', out_dir=models_dir)
         f0_hz = extract_f0_rmvpe(wav, sr, rmvpe_model_path, device=device)
     else:

@@ -1,10 +1,7 @@
 # Модуль для загрузки HuBERT (квантайзер)
 # Адаптация под rvc-python (https://github.com/daswer123/rvc-python)
 import torch
-import os
-import numpy as np
 import torch.nn as nn
-import torch.nn.functional as F
 
 class HubertSoft(nn.Module):
     def __init__(self, hubert_path, device='cpu'):

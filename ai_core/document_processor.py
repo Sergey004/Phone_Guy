@@ -1,11 +1,8 @@
 import os
 import logging
 import rich.logging
-from typing import List
-import hashlib
-import time
 
-from langchain_community.document_loaders import PyPDFLoader, TextLoader, UnstructuredMarkdownLoader, UnstructuredWordDocumentLoader
+from langchain_community.document_loaders import PyPDFLoader, TextLoader, UnstructuredMarkdownLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings
 from langchain_community.vectorstores import Chroma

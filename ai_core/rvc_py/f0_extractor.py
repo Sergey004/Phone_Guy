@@ -1,6 +1,5 @@
 # F0 extractor (адаптация под rvc-python)
 import numpy as np
-import torch
 import librosa
 
 def extract_f0(wav, sr, method='rmvpe', device='cpu'):

@@ -1,5 +1,4 @@
 import asyncio
-import socket
 import random
 import hashlib
 import time
@@ -163,7 +162,8 @@ class SIPClient(asyncio.DatagramProtocol):
         try:
             if "sip:" in uri: return uri.split("sip:")[1].split("@")[0]
             return "unknown"
-        except: return "unknown"
+        except Exception:
+            return "unknown"
 
     def _build_register_packet(self, auth=None):
         msg = f"REGISTER sip:{self.server_ip} SIP/2.0\r\nVia: SIP/2.0/UDP {self.local_ip}:{self.sip_port};branch={self.branch};rport\r\nFrom: <sip:{self.username}@{self.server_ip}>;tag={self.local_tag}\r\nTo: <sip:{self.username}@{self.server_ip}>\r\nCall-ID: {self.call_id}\r\nCSeq: {self.cseq} REGISTER\r\nContact: <sip:{self.username}@{self.local_ip}:{self.sip_port}>\r\nMax-Forwards: 70\r\nUser-Agent: PhoneGuyBot/1.0\r\n"

@@ -77,94 +77,96 @@ SIP_SERVER=pbx.example.com:5060
 NVIDIA_API_KEY=your_key_here
 NVIDIA_MODEL=meta/llama3-70b-instruct
 
-# Optional: Local SIP testing
-# SIP_DOMAIN=127.0.0.1
-# SIP_SERVER=127.0.0.1:5060
+# Optional: Outbound call (comment out or leave empty for incoming only)
+# TARGET_NUMBER=1001
+
+# TTS Settings
+TTS_ENGINE=turbo
+TTS_DEVICE=cuda
+
+# RVC Voice Model (optional)
+RVC_ENABLED=true
+AUDIO_PROMPT_PATH=ai_core/models/RVC/PhoneGuyFNAF1/PhoneGuy_FNAF1_01.wav
+RVC_MODEL_PATH=ai_core/models/RVC/PhoneGuyFNAF1/PhoneGuyFNAF1_e1000_s22000.pth
+RVC_INDEX_PATH=ai_core/models/RVC/PhoneGuyFNAF1/added_IVF339_Flat_nprobe_1_PhoneGuyFNAF1_v2.index
+RVC_F0_METHOD=rmvpe
+RVC_PITCH_SHIFT=0
+RVC_INDEX_RATE=0.6
 ```
 
-### 2. Bot Configuration
+### 2. Bot Configuration (Optional)
 
-Edit `new_voip/main_integration.py` to configure SIP settings:
+All settings can be configured via `.env`. The main entry point is `main_integration.py`:
 
 ```python
-SIP_USER = "555533"
-SIP_PASS = "Test1234"
-SIP_SERVER = "192.168.1.176"
+# SIP settings are read from .env
+SIP_USER = os.getenv('SIP_USER', '555533')
+SIP_PASS = os.getenv('SIP_PASSWORD', 'Test1234')
+SIP_SERVER = os.getenv('SIP_SERVER', '192.168.1.176:5060').split(':')[0]
 LOCAL_IP = "192.168.1.181"
-TARGET_NUMBER = None  # Set to None for incoming calls, or number for outgoing
-```
 
-### 3. Configure AI and Voice
-
-Edit `MOCK_CONFIG` in `new_voip/main_integration.py`:
-
-```python
-MOCK_CONFIG = {
-    'stt': {
-        'model': 'small',  # tiny, base, small, medium, large
-        'device': 'cuda',
-        'language': 'en'
-    },
-    'tts': {
-        'engine': 'turbo',  # turbo, multilingual, standard
-        'device': 'cuda',
-        'language_id': 'en',
-        'audio_prompt_path': "/path/to/reference/audio.wav",
-        'rvc_enabled': True,
-        'rvc_model_path': '/path/to/rvc_model.pth',
-        'rvc_index_path': '/path/to/rvc_index.index',
-        'rvc_f0_method': 'rmvpe',
-        'rvc_pitch_shift': 0,
-        'rvc_index_rate': 0.6
-    }
-}
+# For incoming calls: leave TARGET_NUMBER unset in .env
+# For outgoing calls: set TARGET_NUMBER=123456789 in .env
+TARGET_NUMBER = os.getenv('TARGET_NUMBER')
 ```
 
 ## 📁 Project Structure
 
 ```
 Phone_Guy/
-├── new_voip/
-│   ├── main_integration.py    # Main entry point
-│   ├── ai_service.py          # NVIDIA LLM integration
-│   ├── ai_config.py           # AI prompts and configuration
-│   ├── stt_adapter.py         # Speech-to-Text (Whisper)
-│   ├── tts_adapter.py         # Text-to-Speech (Chatterbox)
-│   ├── sip_rtp_client.py      # SIP/RTP protocol handler
-│   ├── bridge.py              # Audio bridge for RTP
-│   ├── audio_engine.py        # Audio processing utilities
-│   ├── audio_codecs.py        # Codec implementations
-│   ├── rvc_py/                # RVC voice conversion module
-│   │   ├── rvc_infer.py       # RVC inference function
-│   │   ├── rvc_model.py       # RVC model class
-│   │   └── ...
-│   └── models/                # Voice models directory
-├── logs/                      # Call logs (auto-created)
-├── .env.example              # Environment variables template
-├── requirements.txt          # Python dependencies
-├── run.sh                    # Startup script
-└── README.md                 # This file
+├── main_integration.py          # Main entry point
+├── telephony/                    # SIP/RTP telephony module
+│   ├── __init__.py
+│   ├── sip_rtp_client.py        # SIP/RTP protocol handler
+│   ├── bridge.py                # Audio bridge for RTP
+│   ├── audio_engine.py          # Audio processing utilities
+│   ├── audio_codecs.py          # Codec implementations
+│   └── wav player.py            # WAV file player
+│
+├── ai_core/                      # AI and voice processing module
+│   ├── __init__.py
+│   ├── ai_service.py            # NVIDIA LLM integration
+│   ├── ai_config.py             # AI prompts and configuration
+│   ├── stt_adapter.py           # Speech-to-Text (Whisper)
+│   ├── tts_adapter.py           # Text-to-Speech (Chatterbox)
+│   ├── document_processor.py    # RAG document processing
+│   ├── convert_audio.py         # Audio conversion utilities
+│   ├── rvc_py/                  # RVC voice conversion module
+│   │   ├── rvc_infer.py         # RVC inference function
+│   │   ├── rvc_model.py         # RVC model class
+│   │   ├── download_models.py   # Model downloader
+│   │   └── lib/                 # RVC internal libraries
+│   │
+│   └── models/                  # Voice models (RVC)
+│       └── RVC/
+│           └── PhoneGuyFNAF1/   # Example voice model
+│               ├── *.pth
+│               ├── *.index
+│               └── *.wav
+│
+├── knowledge_base/              # RAG documents
+├── chroma_db/                   # Vector database (auto-created)
+├── user_memories/               # User memory storage (auto-created)
+├── logs/                        # Call logs (auto-created)
+├── .env.example                 # Environment variables template
+├── .env                         # Your configuration
+├── requirements.txt             # Python dependencies
+├── run.sh                       # Startup script
+└── README.md                    # This file
 ```
 
 ## 🎯 Usage
 
 ### Running the Bot
 
-**Option 1: Using the startup script (Linux/Mac)**
-```bash
-chmod +x run.sh
-./run.sh
-```
-
-**Option 2: Direct Python execution**
 ```bash
 source .venv/bin/activate
-python new_voip/main_integration.py
+python main_integration.py
 ```
 
 ### Incoming Calls
 
-Set `TARGET_NUMBER = None` in `main_integration.py`. The bot will:
+Leave `TARGET_NUMBER` unset (commented out or empty) in `.env`. The bot will:
 1. Register with the SIP server
 2. Wait for incoming calls
 3. Generate greeting while phone rings
@@ -173,7 +175,7 @@ Set `TARGET_NUMBER = None` in `main_integration.py`. The bot will:
 
 ### Outgoing Calls
 
-Set `TARGET_NUMBER = "destination_number"` in `main_integration.py`. The bot will:
+Set `TARGET_NUMBER=123456789` in `.env`. The bot will:
 1. Register with the SIP server
 2. Initiate call to the specified number
 3. Start conversation when connected
@@ -183,42 +185,48 @@ Set `TARGET_NUMBER = "destination_number"` in `main_integration.py`. The bot wil
 
 Press `Ctrl+C` to gracefully stop the bot.
 
-## 🎤 RVC Models Setup
+## 🎤 RVC Voice Models Setup
 
-To enable voice cloning (Phone Guy's voice), you need RVC models:
+To enable voice cloning (Phone Guy's voice), you need RVC models.
 
-### 1. Download RVC Models
+### 1. Model Directory
 
-- **Models Directory**: `new_voip/models/RVC/`
-- **Required Files**:
-  - `.pth` file - The trained RVC model
-  - `.index` file - Faiss index for voice retrieval
+Place RVC models in `ai_core/models/RVC/`:
 
-### 2. Model Sources
+```
+ai_core/models/RVC/
+└── PhoneGuyFNAF1/
+    ├── PhoneGuyFNAF1_e1000_s22000.pth    # Trained RVC model
+    ├── added_IVF339_Flat_nprobe_1_PhoneGuyFNAF1_v2.index  # Faiss index
+    └── PhoneGuy_FNAF1_01.wav             # Reference audio
+```
+
+### 2. Configure Model Paths in `.env`
+
+```env
+RVC_ENABLED=true
+AUDIO_PROMPT_PATH=ai_core/models/RVC/PhoneGuyFNAF1/PhoneGuy_FNAF1_01.wav
+RVC_MODEL_PATH=ai_core/models/RVC/PhoneGuyFNAF1/PhoneGuyFNAF1_e1000_s22000.pth
+RVC_INDEX_PATH=ai_core/models/RVC/PhoneGuyFNAF1/added_IVF339_Flat_nprobe_1_PhoneGuyFNAF1_v2.index
+RVC_F0_METHOD=rmvpe
+RVC_PITCH_SHIFT=0
+RVC_INDEX_RATE=0.6
+```
+
+### 3. Download Base Models (Optional)
+
+Some RVC features require additional models:
+
+```bash
+cd ai_core/rvc_py
+python download_models.py
+```
+
+### 4. Model Sources
 
 You can find RVC models at:
-
 - [Hugging Face](https://huggingface.co/models?search=rvc)
-- In web
-
-
-
-### 3. Configure Model Paths
-
-Update paths in `MOCK_CONFIG`:
-
-```python
-'rvc_model_path': '/home/user/Test_Phone_new/new_voip/models/RVC/PhoneGuyFNAF1/PhoneGuyFNAF1_e1000_s22000.pth',
-'rvc_index_path': '/home/user/Test_Phone_new/new_voip/models/RVC/PhoneGuyFNAFadded_IVF339_Flat_nprobe_1_PhoneGuyFNAF1_v2.index',
-```
-
-### 4. Reference Audio
-
-Provide a reference audio file for TTS style matching:
-
-```python
-'audio_prompt_path': "/home/user/Test_Phone_new/new_voip/models/RVC/PhoneGuyFNAF1/PhoneGuy_FNAF1_01.wav",
-```
+- On Web
 
 ## 🔧 Troubleshooting
 
@@ -227,7 +235,7 @@ Provide a reference audio file for TTS style matching:
 **Problem**: Bot fails to register with SIP server
 
 **Solutions**:
-- Check SIP credentials in `.env` and `main_integration.py`
+- Check SIP credentials in `.env`
 - Verify SIP server is reachable: `telnet SIP_SERVER 5060`
 - Check firewall rules for UDP port 5060
 - Ensure `LOCAL_IP` is correctly set
@@ -247,11 +255,11 @@ Provide a reference audio file for TTS style matching:
 **Problem**: Voice conversion fails or doesn't work
 
 **Solutions**:
-- Verify RVC model paths are correct
+- Verify RVC model paths are correct in `.env`
 - Check if model file is corrupted
 - Ensure all RVC dependencies are installed
-- Try different `f0_method`: `rmvpe`, `torchcrepe`, `parselmouth`
-- Check CUDA availability: `torch.cuda.is_available()`
+- Try different `RVC_F0_METHOD`: `rmvpe`, `dio`, `harvest`
+- Check CUDA availability: `python -c "import torch; print(torch.cuda.is_available())"`
 
 ### NVIDIA API Issues
 
@@ -268,7 +276,6 @@ Provide a reference audio file for TTS style matching:
 **Problem**: Slow response times
 
 **Solutions**:
-
 - Use GPU acceleration (CUDA)
 - Use smaller Whisper model (`tiny` or `base`)
 - Use `turbo` TTS engine
@@ -300,7 +307,6 @@ Log format:
 ## 🤝 Contributing
 
 Contributions are welcome! Feel free to:
-
 - Report bugs
 - Suggest new features
 - Submit pull requests

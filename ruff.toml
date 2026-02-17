@@ -1,0 +1,13 @@
+[lint]
+ignore = [
+    "E701",  # Multiple statements on one line
+    "E741",  # Ambiguous variable name
+    "E712",  # Equality comparisons to True/False
+    "E711",  # Comparison to None
+    "E721",  # Type comparisons
+    "E402",  # Module level import not at top of file
+    "F811",  # Redefinition of unused
+    "F841",  # Local variable assigned but never used
+    "F821",  # Undefined name (RVC third-party code)
+    "F401",  # Unused imports (some are intentional for availability checks)
+]

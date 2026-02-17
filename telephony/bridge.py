@@ -1,4 +1,3 @@
-import asyncio
 import numpy as np
 import audioop
 from telephony.audio_engine import AudioSource

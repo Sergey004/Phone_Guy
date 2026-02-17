@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import sys
 import datetime
 from dotenv import load_dotenv
 
@@ -11,11 +10,6 @@ load_dotenv()
 try:
     import torch
     print(f"✓ PyTorch {torch.__version__} detected")
-except ImportError:
-    pass
-try:
-    from ai_core.rvc_py.rvc_infer import rvc_infer
-    print("✓ RVC module imported")
 except ImportError:
     pass
 

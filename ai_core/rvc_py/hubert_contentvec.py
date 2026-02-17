@@ -2,8 +2,6 @@
 # Источник: https://github.com/auspicious3000/contentvec/blob/main/hubert/hubert_model.py
 import torch
 import torch.nn as nn
-import numpy as np
-import os
 import fairseq
 from fairseq.data.dictionary import Dictionary
 import torch.serialization
