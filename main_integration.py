@@ -32,7 +32,7 @@ logger = logging.getLogger("PhoneBot")
 SIP_USER = os.getenv("SIP_USER", "555533")
 SIP_PASS = os.getenv("SIP_PASSWORD", "Test1234")
 SIP_SERVER = os.getenv("SIP_SERVER", "192.168.1.176:5060").split(":")[0]
-LOCAL_IP = "192.168.1.181"
+LOCAL_IP = os.getenv("HOST_IP")
 TARGET_NUMBER = os.getenv("TARGET_NUMBER")
 
 MOCK_CONFIG = {
