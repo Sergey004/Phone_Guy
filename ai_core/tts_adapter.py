@@ -11,17 +11,22 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 # Проверка доступности chatterbox
+_chatterbox_error = None
 try:
     from chatterbox.tts import ChatterboxTTS
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
     from chatterbox.tts_turbo import ChatterboxTurboTTS
 
+    # Дополнительная проверка - классы могут импортироваться но быть None
+    if ChatterboxTTS is None or ChatterboxTurboTTS is None:
+        raise ImportError("chatterbox-tts classes are None")
     CHATTERBOX_AVAILABLE = True
-except ImportError:
+except Exception as e:
     CHATTERBOX_AVAILABLE = False
     ChatterboxTTS = None
     ChatterboxMultilingualTTS = None
     ChatterboxTurboTTS = None
+    _chatterbox_error = str(e)
 
 # Проверка доступности RVC
 try:
@@ -68,25 +73,43 @@ class TTSAdapter:
             return self._model
 
         if not CHATTERBOX_AVAILABLE:
-            raise ImportError("chatterbox-tts library is not installed")
+            raise ImportError(
+                f"chatterbox-tts library is not installed or broken. "
+                f"Install with: pip install chatterbox-tts. Error: {_chatterbox_error}"
+            )
 
         self.logger.info(f"Initializing TTS Model: {self.engine} on {self.device}")
-        if self.engine.lower() == "turbo":
-            if ChatterboxTurboTTS is None:
-                raise ImportError("ChatterboxTurboTTS not available")
-            self._model = ChatterboxTurboTTS.from_pretrained(device=self.device)
-        elif self.engine.lower() == "multilingual":
-            if ChatterboxMultilingualTTS is None:
-                raise ImportError("ChatterboxMultilingualTTS not available")
-            self._model = ChatterboxMultilingualTTS.from_pretrained(device=self.device)
-        else:
-            if ChatterboxTTS is None:
-                raise ImportError("ChatterboxTTS not available")
-            self._model = ChatterboxTTS.from_pretrained(device=self.device)
+        try:
+            if self.engine.lower() == "turbo":
+                if ChatterboxTurboTTS is None:
+                    raise ImportError("ChatterboxTurboTTS class is None")
+                self._model = ChatterboxTurboTTS.from_pretrained(device=self.device)
+            elif self.engine.lower() == "multilingual":
+                if ChatterboxMultilingualTTS is None:
+                    raise ImportError("ChatterboxMultilingualTTS class is None")
+                self._model = ChatterboxMultilingualTTS.from_pretrained(
+                    device=self.device
+                )
+            else:
+                if ChatterboxTTS is None:
+                    raise ImportError("ChatterboxTTS class is None")
+                self._model = ChatterboxTTS.from_pretrained(device=self.device)
+        except TypeError as e:
+            if "'NoneType' object is not callable" in str(e):
+                raise ImportError(
+                    f"chatterbox-tts installation is corrupted. "
+                    f"Try reinstalling: pip uninstall chatterbox-tts && pip install chatterbox-tts"
+                )
+            raise
         return self._model
 
     async def check_health(self) -> bool:
         try:
+            if not CHATTERBOX_AVAILABLE:
+                self.logger.error(
+                    f"TTS health check failed: chatterbox-tts not available. {_chatterbox_error}"
+                )
+                return False
             await asyncio.get_event_loop().run_in_executor(None, self._get_model)
             return True
         except Exception as e:

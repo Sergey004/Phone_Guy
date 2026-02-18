@@ -208,7 +208,6 @@ typing_extensions==4.15.0
 tzdata==2025.3
 urllib3==2.6.3
 uuid_utils==0.14.0
-uv==0.9.26
 uvicorn==0.40.0
 uvloop==0.22.1
 virtualenv==20.36.1
