@@ -97,8 +97,8 @@ class TTSAdapter:
         except TypeError as e:
             if "'NoneType' object is not callable" in str(e):
                 raise ImportError(
-                    f"chatterbox-tts installation is corrupted. "
-                    f"Try reinstalling: pip uninstall chatterbox-tts && pip install chatterbox-tts"
+                    "chatterbox-tts installation is corrupted. "
+                    "Try reinstalling: pip uninstall chatterbox-tts && pip install chatterbox-tts"
                 )
             raise
         return self._model
