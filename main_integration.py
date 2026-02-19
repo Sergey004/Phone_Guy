@@ -44,7 +44,7 @@ MOCK_CONFIG = {
         "language": os.getenv("STT_LANGUAGE", ""),
         "compute_type": os.getenv("STT_COMPUTE_TYPE", "float16"),
         "beam_size": int(os.getenv("STT_BEAM_SIZE", "5")),
-        "translate": False,
+        "translate": os.getenv('STT_TRANSLATE', False),
     },
     "tts": {
         "engine": os.getenv("TTS_ENGINE", "turbo"),
