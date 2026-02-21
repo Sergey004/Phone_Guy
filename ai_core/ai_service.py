@@ -33,7 +33,8 @@ if NVIDIA_API_KEY:
             api_key=NVIDIA_API_KEY,
             model=os.getenv("NVIDIA_MODEL", "meta/llama3-70b-instruct"),
             temperature=0.7, top_p=0.9, max_tokens=1024,
-            extra_body={"chat_template_kwargs": {"thinking": True}}
+            model_kwargs={
+                "extra_body":{"chat_template_kwargs": {"thinking": True}}}
         )
         # 1. Знания о мире (FNAF Lore)
         rag_processor = DocumentProcessor(doc_path="knowledge_base", collection_name="phoneguy_brain")
