@@ -59,7 +59,6 @@ def set_caller_context(caller_id: str):
     
     if memory_processor and caller_id:
         logger.info(f"🧠 Retrieving memory for CallerID: {caller_id}")
-        # Ищем воспоминания, связанные с этим номером
         memories = memory_processor.retrieve_documents("who is this user summary", k=3, filter_meta={"caller_id": caller_id})
         
         if memories:
@@ -68,9 +67,79 @@ def set_caller_context(caller_id: str):
         else:
             logger.info("🧠 No memory found (New Caller).")
 
+
+def _build_adaptive_system_prompt(context_type: str = "normal") -> str:
+    """
+    Создаёт адаптивный system prompt в зависимости от контекста.
+    
+    Args:
+        context_type: 'greeting' | 'normal' | 'ongoing'
+    """
+    base = SYSTEM_INSTRUCTIONS
+    
+    if current_user_context:
+        base += f"\n\n=== KNOWN CALLER ==={current_user_context}\nYou RECOGNIZE this person. Greet them by name warmly but nervously."
+    else:
+        base += "\n\n=== NEW CALLER ===\nYou do NOT recognize this caller. Be cautious and suspicious. Ask 'Uh, hello? Who is this?'"
+    
+    if context_type == "greeting":
+        base += "\n\nFIRST CONTACT: Your greeting just played. Wait for their response."
+    elif context_type == "ongoing":
+        base += "\n\nCONVERSATION ACTIVE: Respond naturally to what they say. Reference previous calls if you know them."
+    elif context_type == "normal":
+        base += "\n\nRespond to the user's message naturally."
+    
+    return base
+
+
+def generate_phoneguy_greeting() -> str:
+    """
+    Генерирует приветствие для первого контакта.
+    Правильно инициализирует conversation_history без дублирования сообщений.
+    """
+    if not AI_ENABLED or not llm:
+        return "Uh, hello?"
+    
+    logger.info("🎯 Generating adaptive greeting...")
+    
+    full_system = _build_adaptive_system_prompt(context_type="greeting")
+    conversation_history.append(SystemMessage(content=full_system))
+    
+    greeting_prompt = "You are Phone Guy. Someone just called your office. Your greeting audio just played. Say hello nervously. Start with 'Uh, hello? Hello, hello?'"
+    
+    conversation_history.append(HumanMessage(content=greeting_prompt))
+    
+    try:
+        response = llm.invoke(conversation_history)
+        raw = response.content.strip() if response.content else ""
+        cleaned = clean_response_text(raw)
+        
+        if cleaned:
+            conversation_history.append(AIMessage(content=cleaned))
+            logger.info(f"🤖 Greeting generated: {cleaned[:50]}...")
+            return cleaned
+    except Exception as e:
+        logger.error(f"❌ Greeting generation failed: {e}")
+    
+    fallback = "Uh, hello? Hello, hello?"
+    conversation_history.append(AIMessage(content=fallback))
+    return fallback
+
 async def summarize_and_save(caller_id: str):
     """Сжимает диалог и сохраняет в память"""
-    if not memory_processor or not conversation_history or not caller_id: return
+    logger.info(f"📝 [summarize_and_save] Called for caller_id: {caller_id}")
+    logger.info(f"📝 [summarize_and_save] memory_processor exists: {memory_processor is not None}")
+    logger.info(f"📝 [summarize_and_save] conversation_history length: {len(conversation_history)}")
+    
+    if not memory_processor:
+        logger.error("❌ memory_processor is None - NVIDIA_API_KEY missing or initialization failed")
+        return
+    if not conversation_history:
+        logger.warning("⚠️ conversation_history is empty - nothing to save")
+        return
+    if not caller_id:
+        logger.warning("⚠️ caller_id is empty")
+        return
 
     logger.info("📝 Summarizing call...")
     
@@ -118,25 +187,26 @@ def phoneguy_reply(user_text: str, ignore_system_instructions: bool = False) -> 
     if not AI_ENABLED or not llm: return "Uh, hello?"
     if not user_text or len(user_text.strip()) < 2: return None
 
-    # 1. RAG (База знаний) - ищем факты о FNAF
     rag_context = ""
     if rag_processor:
-        # Ищем без фильтра по caller_id, просто по смыслу
         found_text = rag_processor.retrieve_documents(user_text, k=1, filter_meta=None)
         if found_text:
             rag_context = f"\n\n[OFFICE FILES]:\n{found_text}\n(Use this info, act like you're reading it)"
 
-    # 2. Формирование истории
-    if not ignore_system_instructions and not conversation_history:
-        # В начало диалога добавляем Промпт + Память о юзере
-        full_system = SYSTEM_INSTRUCTIONS + current_user_context
-        conversation_history.append(SystemMessage(content=full_system))
-    
-    # Сообщение юзера + найденный факт из PDF
+    if not ignore_system_instructions:
+        if not conversation_history:
+            full_system = _build_adaptive_system_prompt(context_type="normal")
+            conversation_history.append(SystemMessage(content=full_system))
+        elif len(conversation_history) == 2:
+            system_msg = conversation_history[0]
+            if isinstance(system_msg, SystemMessage):
+                adaptive_system = _build_adaptive_system_prompt(context_type="ongoing")
+                conversation_history[0] = SystemMessage(content=adaptive_system)
+                logger.info("🔄 Updated system prompt for ongoing conversation")
+
     full_msg = user_text + rag_context
     conversation_history.append(HumanMessage(content=full_msg))
 
-    # 3. Retry
     max_retries = 2
     ai_response_text = ""
     for attempt in range(max_retries):

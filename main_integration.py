@@ -18,6 +18,7 @@ from ai_core.stt_adapter import STTAdapter
 from ai_core.tts_adapter import TTSAdapter
 from ai_core.ai_service import (
     phoneguy_reply,
+    generate_phoneguy_greeting,
     rag_processor,
     set_caller_context,
     summarize_and_save,
@@ -95,26 +96,17 @@ async def prepare_incoming_greeting(client_instance):
     setup_logging_file()
     _bridge_ref.buffer.clear()
 
-    # 1. Загружаем память (Long-term Memory)
     caller_id = client_instance.remote_number
     if caller_id:
         logger.info(f"📂 Identified Caller ID: {caller_id}")
         set_caller_context(caller_id)
-        # Сбрасываем историю сообщений, так как это новый звонок
         reset_conversation_history()
     else:
         logger.warning("⚠️ Caller ID unknown")
 
-    # 2. Генерируем приветствие
-    logger.info("📞 Generating greeting based on memory...")
-    scenario_prompt = (
-        "You are Phone Guy. Someone called your office. "
-        "If you recognize the caller from the context memory provided (SYSTEM PROMPT), greet them personally and nervously. "
-        "If not, ask who is this. Start with 'Uh, hello? Hello, hello?'."
-    )
-
+    logger.info("📞 Generating adaptive greeting...")
     logger.info("🤔 AI thinking...")
-    text = await asyncio.to_thread(phoneguy_reply, scenario_prompt)
+    text = await asyncio.to_thread(generate_phoneguy_greeting)
     logger.info(f"🤖 Generated: {text}")
 
     log_to_file("Phone Guy", text)
@@ -196,6 +188,13 @@ async def main():
                 logger.info("📞 Waiting for call...")
 
             await client.call_connected_event.wait()
+
+            if TARGET_NUMBER:
+                logger.info("📞 Generating outgoing greeting...")
+                text = await asyncio.to_thread(generate_phoneguy_greeting)
+                logger.info(f"🤖 Generated: {text}")
+                log_to_file("Phone Guy", text)
+                await tts.speak(text, media_port=bridge)
 
             await conversation_loop(stt, tts, bridge, client)
 

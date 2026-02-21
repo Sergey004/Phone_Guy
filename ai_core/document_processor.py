@@ -102,11 +102,13 @@ class DocumentProcessor:
 
     def add_memory(self, text: str, metadata: dict):
         """Сохраняет воспоминание о звонке"""
-        if not self.vector_store: return
+        if not self.vector_store:
+            logger.error("❌ add_memory: vector_store is None")
+            return
         try:
             doc = Document(page_content=text, metadata=metadata)
             self.vector_store.add_documents([doc])
-            logger.info(f"💾 Memory saved for {metadata.get('caller_id')}")
+            logger.info(f"💾 Memory saved for {metadata.get('caller_id')}: {text[:50]}...")
         except Exception as e:
             logger.error(f"❌ Failed to save memory: {e}")
 

@@ -6,8 +6,9 @@ This file provides guidelines for AI agents working on this codebase.
 
 ### Running the Application
 ```bash
-# Activate virtual environment
-source .venv/bin/activate
+# Activate conda environment
+source /home/user/miniconda3/etc/profile.d/conda.sh
+conda activate phoneguy
 
 # Run main application (incoming calls mode)
 python main_integration.py
@@ -18,6 +19,10 @@ python main_integration.py  # Set TARGET_NUMBER in .env
 
 ### Linting with Ruff
 ```bash
+# Activate conda first
+source /home/user/miniconda3/etc/profile.d/conda.sh
+conda activate phoneguy
+
 # Check linting
 ruff check .
 
@@ -30,6 +35,10 @@ ruff format .
 
 ### Testing with Pytest
 ```bash
+# Activate conda first
+source /home/user/miniconda3/etc/profile.d/conda.sh
+conda activate phoneguy
+
 # Run all tests
 pytest
 
