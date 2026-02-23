@@ -117,17 +117,14 @@ class DocumentProcessor:
         if not self.vector_store or not query: return ""
         
         try:
-            # Если передан фильтр (например caller_id), ищем только по нему
             docs = self.vector_store.similarity_search(query, k=k, filter=filter_meta)
             if not docs: return ""
             
             context_parts = []
             for d in docs:
-                # Если это память о юзере
                 if 'caller_id' in d.metadata:
                     date = d.metadata.get('timestamp', '')[:10]
                     context_parts.append(f"[MEMORY {date}]: {d.page_content}")
-                # Если это документ компании
                 else:
                     src = os.path.basename(str(d.metadata.get('source', 'Unknown')))
                     context_parts.append(f"[FILE {src}]: {d.page_content}")
@@ -135,4 +132,31 @@ class DocumentProcessor:
             return "\n\n".join(context_parts)
         except Exception as e:
             logger.error(f"RAG Error: {e}")
+            return ""
+
+    def get_user_memories(self, caller_id: str, k: int = 5) -> str:
+        """Получает все воспоминания для конкретного caller_id"""
+        if not self.vector_store or not caller_id: return ""
+        
+        try:
+            all_docs = self.vector_store.get(limit=100)
+            if not all_docs or not all_docs.get('documents'):
+                return ""
+            
+            docs = all_docs.get('documents', [])
+            metadatas = all_docs.get('metadatas', [])
+            
+            context_parts = []
+            for i, doc in enumerate(docs):
+                meta = metadatas[i] if i < len(metadatas) else {}
+                if meta.get('caller_id') == caller_id and meta.get('type') == 'summary':
+                    date = meta.get('timestamp', '')[:10]
+                    context_parts.append(f"[MEMORY {date}]: {doc}")
+            
+            if not context_parts:
+                return ""
+            
+            return "\n\n".join(context_parts[:k])
+        except Exception as e:
+            logger.error(f"Error getting user memories: {e}")
             return ""

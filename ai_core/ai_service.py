@@ -59,7 +59,7 @@ def set_caller_context(caller_id: str):
     
     if memory_processor and caller_id:
         logger.info(f"🧠 Retrieving memory for CallerID: {caller_id}")
-        memories = memory_processor.retrieve_documents("who is this user summary", k=3, filter_meta={"caller_id": caller_id})
+        memories = memory_processor.get_user_memories(caller_id, k=5)
         
         if memories:
             current_user_context = f"\n\n[MEMORY - PREVIOUS CALLS WITH THIS GUARD]:\n{memories}\n(If the user seems familiar, acknowledge it nervously. If not, ignore this.)"

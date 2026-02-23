@@ -331,3 +331,10 @@ For issues and questions:
 - Check existing issues for solutions
 - Review the troubleshooting section
 
+---
+
+## Section reflection on what has been done
+
+And why did I do this? Why, tell me?
+
+And who needs it anyway? I made garbage that no one needs. Yes, I'm whining because I spent so many hours getting this crap working, replacing three SIP libraries that I had to write my own. Yes, it's funny that the AI ​​audio goes straight to the RTP stream. Yes, it's cool that it says something and responds and even saves who you are and what you are, but this is simply a toy. Other projects of this format would be better than this.
