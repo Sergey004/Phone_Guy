@@ -322,6 +322,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [Chatterbox TTS](https://github.com/resemble-ai/chatterbox) - Text-to-Speech
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) - Speech Recognition
 - [RVC-Project](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI) - Voice Conversion
+- [Voice files](https://triple-a-fazbear.fandom.com/wiki/Phone_Guy/Audio#Five_Nights_at_Freddy's_1) - Only WAV file (covert from OGG and trimed), RVC files found somewhere on the Internet (the author said not to mention him)
 
 ## 📞 Support
 
@@ -330,6 +331,3 @@ For issues and questions:
 - Check existing issues for solutions
 - Review the troubleshooting section
 
----
-
-**Made with ❤️ for FNAF fans and AI enthusiasts**
