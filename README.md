@@ -47,6 +47,12 @@ python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```
 
+OR (on conda is looks better IMHO)
+
+```bash
+conda create -n phoneguy python=3.11
+conda activate phoneguy
+```
 ### 3. Install Dependencies
 
 ```bash
@@ -161,6 +167,10 @@ Phone_Guy/
 
 ```bash
 source .venv/bin/activate
+
+OR
+conda activate phoneguy
+
 python main_integration.py
 ```
 
