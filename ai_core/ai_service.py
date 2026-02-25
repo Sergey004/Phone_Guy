@@ -6,6 +6,7 @@ import re
 import random
 import asyncio
 import datetime
+from typing import Optional
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from ai_core.document_processor import DocumentProcessor
@@ -50,7 +51,27 @@ if NVIDIA_API_KEY:
 
 
 conversation_history = []
-current_user_context = "" # Здесь будет текст "Это Майк, он боится лис"
+current_user_context = ""
+
+_memory_banks = {}
+
+def set_memory_bank(character_name: str):
+    """Устанавливает отдельную базу памяти для персонажа"""
+    global memory_processor
+    bank_path = f"memories_{character_name}"
+    
+    if character_name in _memory_banks:
+        memory_processor = _memory_banks[character_name]
+        logger.info(f"📂 Switched to memory bank: {bank_path}")
+        return
+    
+    if not os.path.exists(bank_path):
+        os.makedirs(bank_path)
+    
+    bank = DocumentProcessor(doc_path=bank_path, collection_name=f"{character_name}_users")
+    _memory_banks[character_name] = bank
+    memory_processor = bank
+    logger.info(f"📂 Created/Switched to memory bank: {bank_path}")
 
 def set_caller_context(caller_id: str):
     """Загружает досье на звонящего"""
@@ -68,14 +89,15 @@ def set_caller_context(caller_id: str):
             logger.info("🧠 No memory found (New Caller).")
 
 
-def _build_adaptive_system_prompt(context_type: str = "normal") -> str:
+def _build_adaptive_system_prompt(context_type: str = "normal", custom_prompt: Optional[str] = None) -> str:
     """
     Создаёт адаптивный system prompt в зависимости от контекста.
     
     Args:
         context_type: 'greeting' | 'normal' | 'ongoing'
+        custom_prompt: Кастомный system prompt для персонажа
     """
-    base = SYSTEM_INSTRUCTIONS
+    base = custom_prompt if custom_prompt else SYSTEM_INSTRUCTIONS
     
     if current_user_context:
         base += f"\n\n=== KNOWN CALLER ==={current_user_context}\nYou RECOGNIZE this person. Greet them by name warmly but nervously."
@@ -92,20 +114,25 @@ def _build_adaptive_system_prompt(context_type: str = "normal") -> str:
     return base
 
 
-def generate_phoneguy_greeting() -> str:
+def generate_phoneguy_greeting(custom_system_prompt: Optional[str] = None, custom_greeting_prompt: Optional[str] = None) -> str:
     """
     Генерирует приветствие для первого контакта.
     Правильно инициализирует conversation_history без дублирования сообщений.
+    
+    Args:
+        custom_system_prompt: Кастомный system prompt персонажа
+        custom_greeting_prompt: Кастомный промпт для генерации приветствия
     """
     if not AI_ENABLED or not llm:
         return "Uh, hello?"
     
     logger.info("🎯 Generating adaptive greeting...")
     
-    full_system = _build_adaptive_system_prompt(context_type="greeting")
+    full_system = _build_adaptive_system_prompt(context_type="greeting", custom_prompt=custom_system_prompt)
     conversation_history.append(SystemMessage(content=full_system))
     
-    greeting_prompt = "You are Phone Guy. Someone just called your office. Your greeting audio just played. Say hello nervously. Start with 'Uh, hello? Hello, hello?'"
+    default_greeting_prompt = "You are Phone Guy. Someone just called your office. Your greeting audio just played. Say hello nervously. Start with 'Uh, hello? Hello, hello?'"
+    greeting_prompt = custom_greeting_prompt if custom_greeting_prompt else default_greeting_prompt
     
     conversation_history.append(HumanMessage(content=greeting_prompt))
     
@@ -222,6 +249,47 @@ def phoneguy_reply(user_text: str, ignore_system_instructions: bool = False) -> 
 
     if not ai_response_text:
         ai_response_text = random.choice(FALLBACK_PHRASES)
+        conversation_history.pop()
+    else:
+        conversation_history.append(AIMessage(content=ai_response_text))
+        conversation_history[-2] = HumanMessage(content=user_text)
+
+    if len(conversation_history) > 12: conversation_history[:] = conversation_history[-12:]
+    return ai_response_text
+
+
+def custom_reply(user_text: str, custom_prompt: Optional[str] = None) -> str:
+    """Ответ для кастомного персонажа. Не ломает phoneguy_reply."""
+    if not AI_ENABLED or not llm: return "Uh, hello?"
+    if not user_text or len(user_text.strip()) < 2: return None
+
+    if not conversation_history:
+        full_system = _build_adaptive_system_prompt(context_type="normal", custom_prompt=custom_prompt)
+        conversation_history.append(SystemMessage(content=full_system))
+    elif len(conversation_history) == 2:
+        system_msg = conversation_history[0]
+        if isinstance(system_msg, SystemMessage):
+            adaptive_system = _build_adaptive_system_prompt(context_type="ongoing", custom_prompt=custom_prompt)
+            conversation_history[0] = SystemMessage(content=adaptive_system)
+            logger.info("🔄 Updated system prompt for ongoing conversation")
+
+    conversation_history.append(HumanMessage(content=user_text))
+
+    max_retries = 2
+    ai_response_text = ""
+    for attempt in range(max_retries):
+        try:
+            response = llm.invoke(conversation_history)
+            raw = response.content.strip() if response.content else ""
+            cleaned = clean_response_text(raw)
+            if cleaned:
+                ai_response_text = cleaned
+                break 
+        except Exception:
+            pass
+
+    if not ai_response_text:
+        ai_response_text = "Huh? What'd you say?"
         conversation_history.pop()
     else:
         conversation_history.append(AIMessage(content=ai_response_text))
