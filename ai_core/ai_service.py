@@ -131,7 +131,7 @@ def generate_phoneguy_greeting(custom_system_prompt: Optional[str] = None, custo
     full_system = _build_adaptive_system_prompt(context_type="greeting", custom_prompt=custom_system_prompt)
     conversation_history.append(SystemMessage(content=full_system))
     
-    default_greeting_prompt = "You are Phone Guy. Someone just called your office. Your greeting audio just played. Say hello nervously. Start with 'Uh, hello? Hello, hello?'"
+    default_greeting_prompt = "Someone just called you. Say hello in your nervous but friendly way."
     greeting_prompt = custom_greeting_prompt if custom_greeting_prompt else default_greeting_prompt
     
     conversation_history.append(HumanMessage(content=greeting_prompt))
