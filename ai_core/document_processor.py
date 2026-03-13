@@ -32,7 +32,7 @@ class DocumentProcessor:
 
         try:
             self.embeddings = NVIDIAEmbeddings(
-                model="nvidia/llama-3.2-nemoretriever-300m-embed-v2",
+                model="nvidia/llama-nemotron-embed-vl-1b-v2",
                 base_url=os.getenv("NVIDIA_API_BASE") or "https://integrate.api.nvidia.com/v1",
                 nvidia_api_key=os.getenv("NVIDIA_API_KEY")
             )
