@@ -5,6 +5,7 @@ import time
 import struct
 import string
 import audioop
+import socket
 
 class RTPProtocol(asyncio.DatagramProtocol):
     def __init__(self, audio_source, dest_ip, dest_port, stt_adapter=None):
@@ -55,6 +56,14 @@ class RTPProtocol(asyncio.DatagramProtocol):
         self.running = False
         if self.transport: self.transport.close()
 
+def get_local_ip_for(server_ip):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((server_ip, 5060))
+        return s.getsockname()[0]
+    finally:
+        s.close()
+
 
 class SIPClient(asyncio.DatagramProtocol):
     def __init__(self, username, password, server_ip, local_ip, stt_adapter=None):
@@ -62,6 +71,7 @@ class SIPClient(asyncio.DatagramProtocol):
         self.password = password
         self.server_ip = server_ip
         self.local_ip = local_ip
+        self.rtp_ip = get_local_ip_for(server_ip) 
         self.stt_adapter = stt_adapter
         
         self.transport = None
@@ -199,8 +209,17 @@ class SIPClient(asyncio.DatagramProtocol):
         return f"SIP/2.0 200 OK\r\nVia: {via}\r\nFrom: {from_hdr}\r\nTo: {to_hdr}\r\nCall-ID: {call_id}\r\nCSeq: {cseq}\r\nContact: <sip:{self.username}@{self.local_ip}:{self.sip_port}>\r\nContent-Type: application/sdp\r\nContent-Length: {len(sdp)}\r\n\r\n{sdp}"
 
     def _build_sdp(self):
-        return f"v=0\r\no=- {self.sess_id} {self.sess_version} IN IP4 {self.local_ip}\r\ns=-\r\nc=IN IP4 {self.local_ip}\r\nt=0 0\r\nm=audio {self.rtp_port} RTP/AVP 8 0\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n"
-
+        return (
+        f"v=0\r\n"
+        f"o=- {self.sess_id} {self.sess_version} IN IP4 {self.rtp_ip}\r\n"
+        f"s=-\r\n"
+        f"c=IN IP4 {self.rtp_ip}\r\n"
+        f"t=0 0\r\n"
+        f"m=audio {self.rtp_port} RTP/AVP 8 0\r\n"
+        f"a=rtpmap:8 PCMA/8000\r\n"
+        f"a=rtpmap:0 PCMU/8000\r\n"
+        f"a=sendrecv\r\n"
+    )
     def _generate_auth(self, nonce, realm, method, uri):
         ha1 = hashlib.md5(f"{self.username}:{realm}:{self.password}".encode()).hexdigest()
         ha2 = hashlib.md5(f"{method}:{uri}".encode()).hexdigest()
