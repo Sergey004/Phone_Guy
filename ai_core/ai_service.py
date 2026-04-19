@@ -85,6 +85,9 @@ def _init_llm():
             )
             current_provider = "ollama"
             logger.info(f"✅ Ollama initialized: {OLLAMA_MODEL} at {OLLAMA_BASE_URL}")
+            logger.info("🔥 Warming up LLM...")
+            llm.invoke([HumanMessage(content="/no_think hi")])
+            logger.info("✅ LLM warm.")
         except Exception as e:
             logger.error(f"❌ Error initializing Ollama: {e}")
             return False
@@ -109,10 +112,13 @@ def _init_llm():
             )
             current_provider = "nvidia"
             logger.info("✅ NVIDIA AI initialized")
+            logger.info("🔥 Warming up LLM...")
+            llm.invoke([HumanMessage(content="/no_think hi")])
+            logger.info("✅ LLM warm.")
         except Exception as e:
             logger.error(f"❌ Error initializing NVIDIA AI: {e}")
             return False
-
+        
     return True
 
 
@@ -239,7 +245,7 @@ def generate_phoneguy_greeting(
     conversation_history.append(SystemMessage(content=full_system))
 
     default_greeting_prompt = (
-        "Someone just called you. Say hello in your nervous but friendly way."
+        "/no_think\n Someone just called you. Say hello in your nervous but friendly way."
     )
     greeting_prompt = (
         custom_greeting_prompt if custom_greeting_prompt else default_greeting_prompt

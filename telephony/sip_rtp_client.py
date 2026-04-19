@@ -109,10 +109,23 @@ class SIPClient(asyncio.DatagramProtocol):
 
     async def _keep_alive(self):
         while True:
+            await asyncio.sleep(45)
             if self.registered:
+                self.registered = False  # сбрасываем до отправки
+            self.cseq += 1
+            await self.register()
+            
+            # Ждём подтверждения 5 секунд
+            for _ in range(50):
+                if self.registered:
+                    break
+                await asyncio.sleep(0.1)
+            
+            if not self.registered:
+                print("⚠️ [SIP] Re-registration failed — PBX unreachable?")
+                # Пробуем ещё раз немедленно
                 self.cseq += 1
                 await self.register()
-            await asyncio.sleep(45)
 
     def set_audio_source(self, source): self.audio_source = source
     def set_prepare_callback(self, callback): self.prepare_audio_callback = callback
@@ -122,6 +135,7 @@ class SIPClient(asyncio.DatagramProtocol):
         if self.transport: self.transport.sendto(msg.encode(), target)
 
     async def register(self):
+        self.branch = "z9hG4bK" + ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
         req = self._build_register_packet()
         self.send_raw(req)
 

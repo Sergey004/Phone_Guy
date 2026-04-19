@@ -101,6 +101,7 @@ class TTSAdapter:
                     "Try reinstalling: pip uninstall chatterbox-tts && pip install chatterbox-tts"
                 )
             raise
+        
         return self._model
 
     async def check_health(self) -> bool:
@@ -111,6 +112,10 @@ class TTSAdapter:
                 )
                 return False
             await asyncio.get_event_loop().run_in_executor(None, self._get_model)
+            # Прогрев RVC — здесь можно await
+            self.logger.info("🔥 Warming up TTS+RVC pipeline...")
+            await self.synthesize("Hello.")
+            self.logger.info("✅ TTS+RVC warm.")
             return True
         except Exception as e:
             self.logger.error(f"TTS health check failed: {e}")
