@@ -18,6 +18,7 @@ class RTPProtocol(asyncio.DatagramProtocol):
         self.timestamp = 0
         self.ssrc = random.randint(0, 0xFFFFFFFF)
         self.running = False
+        self._last_register_cseq = -1 
 
     def connection_made(self, transport):
         self.transport = transport
@@ -113,19 +114,13 @@ class SIPClient(asyncio.DatagramProtocol):
             if self.registered:
                 self.registered = False  # сбрасываем до отправки
             self.cseq += 1
+            self.branch = "z9hG4bK" + ''.join(
+                random.choices(string.ascii_lowercase + string.digits, k=10)
+            )
             await self.register()
-            
-            # Ждём подтверждения 5 секунд
-            for _ in range(50):
-                if self.registered:
-                    break
-                await asyncio.sleep(0.1)
-            
+            await asyncio.sleep(5)              
             if not self.registered:
                 print("⚠️ [SIP] Re-registration failed — PBX unreachable?")
-                # Пробуем ещё раз немедленно
-                self.cseq += 1
-                await self.register()
 
     def set_audio_source(self, source): self.audio_source = source
     def set_prepare_callback(self, callback): self.prepare_audio_callback = callback
@@ -339,6 +334,7 @@ class SIPClient(asyncio.DatagramProtocol):
             elif method == "INVITE": self.send_raw(self._build_invite_packet(self.current_target, auth_h))
         
         elif "200 OK" in first and "REGISTER" in (self._extract_header(lines, "CSeq") or ""):
+            cseq_val = self._extract_header(lines, "CSeq") or ""
             if not self.registered: print("✅ [SIP] Registered Successfully!")
             self.registered = True
 
