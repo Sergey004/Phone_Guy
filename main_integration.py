@@ -51,6 +51,9 @@ MOCK_CONFIG = {
         "engine": os.getenv("TTS_ENGINE", "turbo"),
         "device": os.getenv("TTS_DEVICE", "cuda"),
         "language_id": "en",
+        "cfg_weight": 0.3,
+        "use_bf16": os.getenv("TTS_USE_BF16", "true").lower() == "true",
+        "use_compile": os.getenv("TTS_USE_COMPILE", "true").lower() == "true",
         "audio_prompt_path": os.getenv("AUDIO_PROMPT_PATH", "ai_core/models/RVC/PhoneGuyFNAF1/PhoneGuy_FNAF1_01.wav"),
         "rvc_enabled": os.getenv("RVC_ENABLED", "true").lower() == "true",
         "rvc_model_path": os.getenv("RVC_MODEL_PATH", "ai_core/models/RVC/PhoneGuyFNAF1/PhoneGuy_FNAF1_best.pth"),
@@ -130,6 +133,11 @@ async def conversation_loop(
             logger.info(f"🗣️ User: {user_text}")
             log_to_file("User", user_text)
 
+            # Barge-in: пользователь заговорил — прерываем то что бот говорит
+            if bridge.buffer:
+                logger.info("🤫 Barge-in: clearing TTS buffer")
+                bridge.buffer.clear()
+
             logger.info("🤔 Thinking...")
             ai_reply = await asyncio.to_thread(phoneguy_reply, user_text)
 
@@ -186,6 +194,7 @@ async def main():
                 await client.invite(TARGET_NUMBER)
             else:
                 logger.info("📞 Waiting for call...")
+                client.call_abort_event.clear()
 
             await client.call_connected_event.wait()
 

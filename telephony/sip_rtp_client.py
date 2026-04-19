@@ -89,11 +89,13 @@ class SIPClient(asyncio.DatagramProtocol):
         self.registered = False
         self.in_call = False
         self.current_target = None
-        self.remote_number = None # <-- НОВОЕ ПОЛЕ: КТО НАМ ЗВОНИТ
-        
+        self.remote_number = None
+
         self.rtp_protocol = None
         self.audio_source = None
         self.call_connected_event = asyncio.Event()
+        # Выставляется при CANCEL/BYE/ошибке — прерывает prepare_audio_callback
+        self.call_abort_event = asyncio.Event()
         self.prepare_audio_callback = None
 
     def connection_made(self, transport):
@@ -147,6 +149,13 @@ class SIPClient(asyncio.DatagramProtocol):
         if self.rtp_protocol:
             self.rtp_protocol.stop()
             self.rtp_protocol = None
+
+    def _reset_call_state(self):
+        """Сброс состояния после завершения/отмены звонка."""
+        self._stop_rtp()
+        self.in_call = False
+        self.call_connected_event.clear()
+        self.call_abort_event.set()   # Прерывает prepare_audio_callback если висит
 
     async def _start_rtp(self, remote_ip, remote_port):
         if not self.audio_source: return
@@ -247,24 +256,51 @@ class SIPClient(asyncio.DatagramProtocol):
             response = f"SIP/2.0 200 OK\r\nVia: {via}\r\nFrom: {from_h}\r\nTo: {to_h}\r\nCall-ID: {call_id}\r\nCSeq: {cseq}\r\nContact: <sip:{self.username}@{self.local_ip}:{self.sip_port}>\r\nContent-Length: 0\r\n\r\n"
             self.send_raw(response, dest=addr)
 
+        elif first.startswith("CANCEL"):
+            print("❌ [SIP] Call CANCELLED by remote during ringing")
+            via = self._extract_header(lines, "Via")
+            from_h = self._extract_header(lines, "From")
+            to_h = self._extract_header(lines, "To")
+            call_id = self._extract_header(lines, "Call-ID")
+            cseq = self._extract_header(lines, "CSeq")
+            # RFC 3261: ответить 200 OK на CANCEL, затем 487 на оригинальный INVITE
+            self.send_raw(
+                f"SIP/2.0 200 OK\r\nVia: {via}\r\nFrom: {from_h}\r\nTo: {to_h}\r\n"
+                f"Call-ID: {call_id}\r\nCSeq: {cseq}\r\nContent-Length: 0\r\n\r\n",
+                dest=addr
+            )
+            self.send_raw(
+                f"SIP/2.0 487 Request Terminated\r\nVia: {via}\r\nFrom: {from_h}\r\nTo: {to_h}\r\n"
+                f"Call-ID: {call_id}\r\nCSeq: {cseq.replace('CANCEL','INVITE')}\r\nContent-Length: 0\r\n\r\n",
+                dest=addr
+            )
+            self._reset_call_state()
+
         elif first.startswith("INVITE"):
             print(f"🔔 [SIP] Incoming Call from {addr}")
             self.call_id = self._extract_header(lines, "Call-ID")
             from_h = self._extract_header(lines, "From")
             if "tag=" in from_h: self.remote_tag = from_h.split("tag=")[1].split(";")[0]
-            
-            # --- ИЗВЛЕКАЕМ НОМЕР ---
+
             self.remote_number = self._extract_number_from_uri(from_h)
             print(f"📞 Identified Remote Caller: {self.remote_number}")
 
+            # Сбрасываем abort перед новым звонком
+            self.call_abort_event.clear()
+
             print("[SIP] Sending 180 Ringing...")
             self.send_raw(self._build_180_ringing(lines), dest=addr)
-            
+
             if self.prepare_audio_callback:
                 print("[SIP] Preparing AI greeting...")
-                await self.prepare_audio_callback() # Ждем генерации
+                await self.prepare_audio_callback()
             else:
                 await asyncio.sleep(2)
+
+            # Проверяем — не отменили ли звонок пока мы генерировали
+            if self.call_abort_event.is_set():
+                print("⚠️ [SIP] Call was cancelled during greeting generation — ignoring")
+                return
 
             print("[SIP] Answering Call...")
             self.send_raw(self._build_200_ok(lines), dest=addr)
@@ -303,7 +339,16 @@ class SIPClient(asyncio.DatagramProtocol):
 
         elif "BYE" in first:
             print("📴 [SIP] Call Ended")
-            self._stop_rtp()
-            self.in_call = False
-            self.call_connected_event.clear()
-            self.send_raw(f"SIP/2.0 200 OK\r\nVia: {self._extract_header(lines, 'Via')}\r\nFrom: {self._extract_header(lines, 'From')}\r\nTo: {self._extract_header(lines, 'To')}\r\nCall-ID: {self._extract_header(lines, 'Call-ID')}\r\nCSeq: {self._extract_header(lines, 'CSeq')}\r\nContent-Length: 0\r\n\r\n", dest=addr)
+            self._reset_call_state()
+            self.send_raw(
+                f"SIP/2.0 200 OK\r\nVia: {self._extract_header(lines, 'Via')}\r\n"
+                f"From: {self._extract_header(lines, 'From')}\r\n"
+                f"To: {self._extract_header(lines, 'To')}\r\n"
+                f"Call-ID: {self._extract_header(lines, 'Call-ID')}\r\n"
+                f"CSeq: {self._extract_header(lines, 'CSeq')}\r\nContent-Length: 0\r\n\r\n",
+                dest=addr
+            )
+
+        elif any(code in first for code in ("486 ", "480 ", "503 ", "408 ", "404 ")):
+            print(f"⚠️ [SIP] Call error: {first.strip()}")
+            self._reset_call_state()

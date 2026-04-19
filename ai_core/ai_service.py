@@ -21,7 +21,7 @@ try:
 except ImportError:
     ChatOllama = None
 
-SYSTEM_INSTRUCTIONS = DEFAULT_PROMPT
+SYSTEM_INSTRUCTIONS = "/no_think\n\n" + DEFAULT_PROMPT
 
 logging.basicConfig(
     level="INFO",
@@ -104,7 +104,7 @@ def _init_llm():
                 top_p=LLM_TOP_P,
                 max_tokens=LLM_MAX_TOKENS,
                 model_kwargs={
-                    "extra_body": {"chat_template_kwargs": {"thinking": True}}
+                    "extra_body": {"chat_template_kwargs": {"thinking": False}}
                 },
             )
             current_provider = "nvidia"
