@@ -144,7 +144,7 @@ opentelemetry-semantic-conventions==0.60b1
 orjson==3.11.5
 ormsgpack==1.12.2
 overrides==7.7.0
-packaging @ file:///home/task_176104885106445/conda-bld/packaging_1761049078006/work
+packaging
 pandas==2.3.3
 peft==0.18.1
 pillow==11.3.0
@@ -192,6 +192,7 @@ resemble-perth @ git+https://github.com/resemble-ai/Perth.git@ce86c49d029f42272c
 rich==14.2.0
 rpds-py==0.30.0
 ruff==0.14.13
+rvc-py @ git+https://github.com/Sergey004/rvc_py.git@28bd75c2fecba83bd4ba0c31622f8ea11b764112
 s3tokenizer==0.3.0
 sacrebleu==2.6.0
 safehttpx==0.1.7
