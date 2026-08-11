@@ -193,7 +193,9 @@ def set_caller_context(caller_id: str):
 
 
 def _build_adaptive_system_prompt(
-    context_type: str = "normal", custom_prompt: Optional[str] = None
+    context_type: str = "normal",
+    custom_prompt: Optional[str] = None,
+    direction: str = "incoming",
 ) -> str:
     """
     Создаёт адаптивный system prompt в зависимости от контекста.
@@ -201,13 +203,20 @@ def _build_adaptive_system_prompt(
     Args:
         context_type: 'greeting' | 'normal' | 'ongoing'
         custom_prompt: Кастомный system prompt для персонажа
+        direction: 'incoming' (вам звонят) | 'outgoing' (вы звоните)
     """
     base = custom_prompt if custom_prompt else SYSTEM_INSTRUCTIONS
 
-    if current_user_context:
-        base += f"\n\n=== KNOWN CALLER ==={current_user_context}\nYou RECOGNIZE this person. Greet them by name warmly but nervously."
+    if direction == "outgoing":
+        if current_user_context:
+            base += f"\n\n=== YOU CALLED KNOWN CONTACT ==={current_user_context}\nYou INITIATED this call. You know this person — greet them by name warmly but nervously."
+        else:
+            base += "\n\n=== YOU CALLED UNKNOWN NUMBER ===\nYou INITIATED this call. You do NOT recognize the person you are calling. Be cautious and uncertain. Open with something like 'Uh, hello? Is this...?'"
     else:
-        base += "\n\n=== NEW CALLER ===\nYou do NOT recognize this caller. Be cautious and suspicious. Ask 'Uh, hello? Who is this?'"
+        if current_user_context:
+            base += f"\n\n=== KNOWN CALLER ==={current_user_context}\nYou RECOGNIZE this person. Greet them by name warmly but nervously."
+        else:
+            base += "\n\n=== NEW CALLER ===\nYou do NOT recognize this caller. Be cautious and suspicious. Ask 'Uh, hello? Who is this?'"
 
     if context_type == "greeting":
         base += "\n\nFIRST CONTACT: Your greeting just played. Wait for their response."
@@ -222,6 +231,7 @@ def _build_adaptive_system_prompt(
 def generate_phoneguy_greeting(
     custom_system_prompt: Optional[str] = None,
     custom_greeting_prompt: Optional[str] = None,
+    direction: str = "incoming",
 ) -> str:
     """
     Генерирует приветствие для первого контакта.
@@ -230,6 +240,7 @@ def generate_phoneguy_greeting(
     Args:
         custom_system_prompt: Кастомный system prompt персонажа
         custom_greeting_prompt: Кастомный промпт для генерации приветствия
+        direction: 'incoming' (вам звонят) | 'outgoing' (вы звоните)
     """
     if not AI_ENABLED or not llm:
         logger.warning(
@@ -240,13 +251,19 @@ def generate_phoneguy_greeting(
     logger.info("🎯 Generating adaptive greeting...")
 
     full_system = _build_adaptive_system_prompt(
-        context_type="greeting", custom_prompt=custom_system_prompt
+        context_type="greeting", custom_prompt=custom_system_prompt, direction=direction
     )
     conversation_history.append(SystemMessage(content=full_system))
 
-    default_greeting_prompt = (
-        "/no_think\n Someone just called you. Say hello in your nervous but friendly way."
-    )
+    if direction == "outgoing":
+        default_greeting_prompt = (
+            "/no_think\n You just called this person. Greet them — you initiated "
+            "the call, be nervous but friendly."
+        )
+    else:
+        default_greeting_prompt = (
+            "/no_think\n Someone just called you. Say hello in your nervous but friendly way."
+        )
     greeting_prompt = (
         custom_greeting_prompt if custom_greeting_prompt else default_greeting_prompt
     )

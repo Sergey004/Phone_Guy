@@ -117,6 +117,38 @@ async def prepare_incoming_greeting(client_instance):
     logger.info("✅ Audio ready in buffer!")
 
 
+async def prepare_outgoing_greeting(client_instance):
+    """
+    Вызывается при исходящем звонке — параллельно гудкам у абонента.
+    direction='outgoing' — LLM понимает, что инициировала вызов она.
+    Аудио копится в _bridge_ref.buffer и пойдёт в линию после 200 OK (старт RTP).
+    """
+    setup_logging_file()
+    _bridge_ref.buffer.clear()
+
+    target_number = client_instance.remote_number
+    if target_number:
+        logger.info(f"📂 Outbound call to: {target_number}")
+        set_caller_context(target_number)
+        reset_conversation_history()
+    else:
+        logger.warning("⚠️ Target number unknown")
+
+    logger.info("📞 Generating outgoing greeting (parallel to ringing)...")
+    logger.info("🤔 AI thinking...")
+    text = await asyncio.to_thread(generate_phoneguy_greeting, direction="outgoing")
+    logger.info(f"🤖 Generated: {text}")
+
+    # Если абонент отказал/отбил во время генерации — не кладём аудио в буфер
+    if client_instance.call_abort_event.is_set():
+        logger.info("⚠️ Call aborted during greeting generation — skip TTS")
+        return
+
+    log_to_file("Phone Guy", text)
+    await _tts_ref.speak(text, media_port=_bridge_ref)
+    logger.info("✅ Outgoing audio ready in buffer!")
+
+
 async def conversation_loop(
     stt: STTAdapter, tts: TTSAdapter, bridge: PhoneBridgePort, client: SIPClient
 ):
@@ -186,24 +218,43 @@ async def main():
 
         while True:
             if TARGET_NUMBER:
-                setup_logging_file()
+                # Сбрасываем remote_number и abort — пре-ген использует remote_number
                 client.remote_number = TARGET_NUMBER
-                set_caller_context(TARGET_NUMBER)
-                reset_conversation_history()
+                client.call_abort_event.clear()
+
+                # Стартуем пре-ген параллельно invite — бот генерит реплику,
+                # пока у абонента идут гудки. Аудито копится в bridge.buffer.
+                prepare_task = asyncio.create_task(prepare_outgoing_greeting(client))
 
                 await client.invite(TARGET_NUMBER)
             else:
                 logger.info("📞 Waiting for call...")
                 client.call_abort_event.clear()
+                prepare_task = None
 
-            await client.call_connected_event.wait()
+            # Ждём либо ответа абонента, либо отказа (408/486 и т.п.)
+            # Если сработал call_abort_event — выходим, чтобы цикл продолжился.
+            connect_task = asyncio.create_task(client.call_connected_event.wait())
+            abort_task = asyncio.create_task(client.call_abort_event.wait())
+            done, pending = await asyncio.wait(
+                {connect_task, abort_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for t in pending:
+                t.cancel()
+            if abort_task in done and not connect_task.done():
+                logger.info("⚠️ Call aborted (no answer / rejected) — skipping")
+                if prepare_task is not None and not prepare_task.done():
+                    prepare_task.cancel()
+                continue
 
-            if TARGET_NUMBER:
-                logger.info("📞 Generating outgoing greeting...")
-                text = await asyncio.to_thread(generate_phoneguy_greeting)
-                logger.info(f"🤖 Generated: {text}")
-                log_to_file("Phone Guy", text)
-                await tts.speak(text, media_port=bridge)
+            # Если пре-ген ещё не успел — дождёмся (он почти всегда уже готов).
+            # Если абонент отказал — prepare_task сам отвалится по call_abort_event.
+            if prepare_task is not None and not prepare_task.done():
+                logger.info("⏳ Waiting for outgoing greeting to finish...")
+                try:
+                    await prepare_task
+                except Exception as e:
+                    logger.error(f"Prepare outgoing greeting failed: {e}")
 
             await conversation_loop(stt, tts, bridge, client)
 
