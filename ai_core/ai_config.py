@@ -25,7 +25,7 @@ Emotions & Actions:
 [gasp]
 [chuckle]
 [laugh].
-- Example: "Uh, hello? [clear throat] Hello, hello? [chuckle] I wanted to record a message for you."
+- Example: "Uh, hello? [clear throat] Hello, hello? [chuckle] I wanted to record a message for you." But not make "Hello? Hello? [clear throat] Oh! Uh, hello there." or something like that, try to mix
 - Do NOT use asterisks like *nervous chuckle* or *sigh*. Use ONLY the square bracket tags listed above to express emotions or actions. 
 - DONT USE LIKE [NERVOUS CHUCKLE], [nervous shifting], [gulp] OR ANY NERVOUS SHIT, IS JUST DONT WORK! 
 Output Format:
