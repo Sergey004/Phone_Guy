@@ -37,6 +37,10 @@ class STTAdapter:
         self.out_queue: asyncio.Queue[str] = asyncio.Queue()
         self._frame_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=512)
         self._closed = False
+
+        # Колбэк, вызывается СРАЗУ при обнаружении начала речи (для быстрого barge-in),
+        # ещё до накопления chunk'а и распознавания. Синхронный, не должен блокировать.
+        self.on_speech_start = None
         
         # Whisper Setup
         model_size = stt_cfg.get('model', 'base')
@@ -110,6 +114,12 @@ class STTAdapter:
                     self._current_np.clear()
                     self._current_ms = 0
                     self._silence_ms = 0
+
+                    if self.on_speech_start:
+                        try:
+                            self.on_speech_start()
+                        except Exception as e:
+                            self.logger.error(f"on_speech_start callback failed: {e}", exc_info=True)
                 
                 self._current_np.append(x)
                 self._current_ms += self.frame_ms

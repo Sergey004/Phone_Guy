@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import time
 import datetime
 from dotenv import load_dotenv
 
@@ -69,6 +70,28 @@ _tts_ref = None
 _bridge_ref = None
 _current_log_file = None
 
+# Время (monotonic) последнего запуска TTS-воспроизведения и окно "игнорировать barge-in"
+# сразу после старта фразы бота — чтобы эхо/хвост его же голоса на линии не триггерило
+# самопрерывание. 250мс с запасом под задержку линии/джиттер FreePBX.
+_last_tts_start = 0.0
+ECHO_GUARD_SEC = 0.25
+
+
+async def speak_guarded(tts: TTSAdapter, text: str, bridge: PhoneBridgePort):
+    """Обёртка над tts.speak(), фиксирующая момент старта фразы для echo-guard'а."""
+    global _last_tts_start
+    _last_tts_start = time.monotonic()
+    await tts.speak(text, media_port=bridge)
+
+
+def handle_speech_start(bridge: PhoneBridgePort, logger_: logging.Logger):
+    """Вызывается STT-адаптером СРАЗУ при обнаружении голоса — быстрый barge-in."""
+    if time.monotonic() - _last_tts_start < ECHO_GUARD_SEC:
+        return
+    if bridge.buffer:
+        logger_.info("🤫 Fast barge-in: clearing TTS buffer")
+        bridge.buffer.clear()
+
 
 def setup_logging_file():
     global _current_log_file
@@ -113,7 +136,7 @@ async def prepare_incoming_greeting(client_instance):
     logger.info(f"🤖 Generated: {text}")
 
     log_to_file("Phone Guy", text)
-    await _tts_ref.speak(text, media_port=_bridge_ref)
+    await speak_guarded(_tts_ref, text, _bridge_ref)
     logger.info("✅ Audio ready in buffer!")
 
 
@@ -133,7 +156,9 @@ async def conversation_loop(
             logger.info(f"🗣️ User: {user_text}")
             log_to_file("User", user_text)
 
-            # Barge-in: пользователь заговорил — прерываем то что бот говорит
+            # Основной barge-in теперь происходит мгновенно через STTAdapter.on_speech_start
+            # (см. handle_speech_start выше). Здесь оставляем подстраховку на случай,
+            # если что-то осталось в буфере к моменту готовного текста.
             if bridge.buffer:
                 logger.info("🤫 Barge-in: clearing TTS buffer")
                 bridge.buffer.clear()
@@ -145,7 +170,7 @@ async def conversation_loop(
                 continue
 
             log_to_file("Phone Guy", ai_reply)
-            await tts.speak(ai_reply, media_port=bridge)
+            await speak_guarded(tts, ai_reply, bridge)
 
         except asyncio.TimeoutError:
             continue
@@ -166,6 +191,10 @@ async def main():
 
     client = SIPClient(SIP_USER, SIP_PASS, SIP_SERVER, LOCAL_IP, stt_adapter=stt)
     client.set_audio_source(bridge)
+
+    # Быстрый barge-in: срабатывает буфер TTS при первом же громком фрейме (~20-40мс),
+    # а не ждёт полного распознавания через Whisper (~1.5-2.5с).
+    stt.on_speech_start = lambda: handle_speech_start(bridge, logger)
 
     # Передаем client в колбэк через замыкание (чтобы получить доступ к remote_number)
     async def wrapped_prepare():
@@ -203,7 +232,7 @@ async def main():
                 text = await asyncio.to_thread(generate_phoneguy_greeting)
                 logger.info(f"🤖 Generated: {text}")
                 log_to_file("Phone Guy", text)
-                await tts.speak(text, media_port=bridge)
+                await speak_guarded(tts, text, bridge)
 
             await conversation_loop(stt, tts, bridge, client)
 
