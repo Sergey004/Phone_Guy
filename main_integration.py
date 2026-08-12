@@ -54,10 +54,17 @@ MOCK_CONFIG = {
         "cfg_weight": 0.3,
         "use_bf16": os.getenv("TTS_USE_BF16", "true").lower() == "true",
         "use_compile": os.getenv("TTS_USE_COMPILE", "true").lower() == "true",
-        "audio_prompt_path": os.getenv("AUDIO_PROMPT_PATH", "ai_core/models/RVC/PhoneGuyFNAF1/PhoneGuy_FNAF1_01.wav"),
+        "audio_prompt_path": os.getenv(
+            "AUDIO_PROMPT_PATH",
+            "ai_core/models/RVC/PhoneGuyFNAF1/PhoneGuy_FNAF1_01.wav",
+        ),
         "rvc_enabled": os.getenv("RVC_ENABLED", "true").lower() == "true",
-        "rvc_model_path": os.getenv("RVC_MODEL_PATH", "ai_core/models/RVC/PhoneGuyFNAF1/PhoneGuy_FNAF1_best.pth"),
-        "rvc_index_path": os.getenv("RVC_INDEX_PATH", "ai_core/models/RVC/PhoneGuyFNAF1/added_index.index"),
+        "rvc_model_path": os.getenv(
+            "RVC_MODEL_PATH", "ai_core/models/RVC/PhoneGuyFNAF1/PhoneGuy_FNAF1_best.pth"
+        ),
+        "rvc_index_path": os.getenv(
+            "RVC_INDEX_PATH", "ai_core/models/RVC/PhoneGuyFNAF1/added_index.index"
+        ),
         "rvc_f0_method": os.getenv("RVC_F0_METHOD", "rmvpe"),
         "rvc_pitch_shift": int(os.getenv("RVC_PITCH_SHIFT", "0")),
         "rvc_index_rate": float(os.getenv("RVC_INDEX_RATE", "0.6")),
@@ -183,6 +190,47 @@ async def conversation_loop(
             continue
 
 
+async def _do_outbound_call(client: SIPClient, target: str, stt, tts, bridge):
+    """Инициирует исходящий звонок к `target`, ждёт ответа/отказа,
+    проговаривает outgoing greeting, крутит conversation_loop.
+
+    Возвращает True, если разговор состоялся (after conversation_loop),
+    False — если абонент не ответил/отказал (call abort'нулся).
+    """
+    # Сбрасываем remote_number и abort — пре-ген использует remote_number
+    client.remote_number = target
+    client.call_abort_event.clear()
+
+    # Стартуем пре-ген параллельно invite — бот генерит реплику пока у
+    # абонента идут гудки. Аудио копится в bridge.buffer.
+    prepare_task = asyncio.create_task(prepare_outgoing_greeting(client))
+    await client.invite(target)
+
+    # Ждём либо ответа абонента, либо отказа (408/486 и т.п.)
+    connect_task = asyncio.create_task(client.call_connected_event.wait())
+    abort_task = asyncio.create_task(client.call_abort_event.wait())
+    done, pending = await asyncio.wait(
+        {connect_task, abort_task}, return_when=asyncio.FIRST_COMPLETED
+    )
+    for t in pending:
+        t.cancel()
+    if abort_task in done and not connect_task.done():
+        logger.info("⚠️ Call aborted (no answer / rejected) — skipping")
+        if not prepare_task.done():
+            prepare_task.cancel()
+        return False
+
+    if not prepare_task.done():
+        logger.info("⏳ Waiting for outgoing greeting to finish...")
+        try:
+            await prepare_task
+        except Exception as e:
+            logger.error(f"Prepare outgoing greeting failed: {e}")
+
+    await conversation_loop(stt, tts, bridge, client)
+    return True
+
+
 async def main():
     load_dotenv()
     global _tts_ref, _bridge_ref
@@ -198,6 +246,54 @@ async def main():
 
     client = SIPClient(SIP_USER, SIP_PASS, SIP_SERVER, LOCAL_IP, stt_adapter=stt)
     client.set_audio_source(bridge)
+
+    # --- DTMF admin-menu: удалённое управление ботом через DTMF (RFC 4733) ---
+    # pending_dial — очередь номеров, которые бот должны позвонить после bye(),
+    # проставляемая DtmfAdminController'ом после #9+PIN+9+<digits>+#.
+    pending_dial: asyncio.Queue[str] = asyncio.Queue()
+
+    async def _on_dial_request(number: str) -> None:
+        await pending_dial.put(number)
+
+    dtmf_admin = None
+    if os.getenv("IVR_ENABLED", "true").lower() == "true":
+        from ai_core.dtmf_admin import DtmfAdminController
+
+        dtmf_admin = DtmfAdminController(
+            client,
+            bridge=bridge,
+            tts=tts,
+            stt=stt,
+            admin_pin=os.getenv("IVR_ADMIN_PIN", "1234"),
+            enter_prefix=os.getenv("IVR_ENTER_PREFIX", "#9"),
+            dial_delay_sec=float(os.getenv("IVR_DIAL_DELAY_SEC", "2.5")),
+            menu_timeout_sec=float(os.getenv("IVR_MENU_TIMEOUT_SEC", "5.0")),
+            collect_timeout_sec=float(os.getenv("IVR_COLLECT_TIMEOUT_SEC", "8.0")),
+            prompts={
+                "menu": os.getenv(
+                    "IVR_PROMPT_MENU",
+                    "Admin menu. Press 9 to dial a number, 0 to hang up, hash to exit.",
+                ),
+                "enter_num": os.getenv(
+                    "IVR_PROMPT_ENTER_NUM", "Enter the number, then press hash."
+                ),
+                "confirm": os.getenv(
+                    "IVR_PROMPT_CONFIRM", "Okay, I will call to {number} after hung-up."
+                ),
+                "bad_pin": os.getenv("IVR_PROMPT_BAD_PIN", "Incorrect PIN. Exiting."),
+                "exit": os.getenv("IVR_PROMPT_EXIT", "Exiting admin menu."),
+                "timeout": os.getenv("IVR_PROMPT_TIMEOUT", "Menu timeout."),
+            },
+            on_dial_request=_on_dial_request,
+        )
+        client.dtmf_received_callback = dtmf_admin.handle_digit
+        logger.info(
+            "📟 DTMF admin menu enabled (prefix=%r, dial_delay=%.2fs)",
+            os.getenv("IVR_ENTER_PREFIX", "#9"),
+            float(os.getenv("IVR_DIAL_DELAY_SEC", "2.5")),
+        )
+    else:
+        logger.info("📟 DTMF admin menu disabled (IVR_ENABLED=false)")
 
     # Передаем client в колбэк через замыкание (чтобы получить доступ к remote_number)
     async def wrapped_prepare():
@@ -217,23 +313,54 @@ async def main():
         asyncio.create_task(stt.consume_frame_queue())
 
         while True:
+            # Если в очереди pending_dial лежит номер (от DTMF admin-menu),
+            # переключаемся в режим outbound call к этому номеру.
+            next_target: str | None = None
+            if not pending_dial.empty():
+                try:
+                    next_target = pending_dial.get_nowait()
+                except asyncio.QueueEmpty:
+                    next_target = None
+                if next_target:
+                    logger.info("🔁 Admin dial-out requested -> %s", next_target)
+                    # Сбрасываем состояние admin-меню и STT — бот начинает новый звонок
+                    if dtmf_admin is not None:
+                        dtmf_admin.reset()
+                    # Даём SIP-провайдеру "успокоиться" после bye() c короткой паузой
+                    await asyncio.sleep(1.5)
+
+            if next_target is not None:
+                if dtmf_admin is not None:
+                    # перед стартом нового звонка — новый admin scope
+                    dtmf_admin.reset()
+                await _do_outbound_call(client, next_target, stt, tts, bridge)
+
+                logger.info("Call ended. Saving memory...")
+                if client.remote_number:
+                    await summarize_and_save(client.remote_number)
+                if _current_log_file:
+                    with open(_current_log_file, "a", encoding="utf-8") as f:
+                        f.write("\n=== CALL ENDED ===\n")
+                client.call_connected_event.clear()
+                continue
+
             if TARGET_NUMBER:
-                # Сбрасываем remote_number и abort — пре-ген использует remote_number
-                client.remote_number = TARGET_NUMBER
-                client.call_abort_event.clear()
+                if dtmf_admin is not None:
+                    dtmf_admin.reset()
+                await _do_outbound_call(client, TARGET_NUMBER, stt, tts, bridge)
 
-                # Стартуем пре-ген параллельно invite — бот генерит реплику,
-                # пока у абонента идут гудки. Аудито копится в bridge.buffer.
-                prepare_task = asyncio.create_task(prepare_outgoing_greeting(client))
+                logger.info("Call ended. Saving memory...")
+                if client.remote_number:
+                    await summarize_and_save(client.remote_number)
 
-                await client.invite(TARGET_NUMBER)
-            else:
-                logger.info("📞 Waiting for call...")
-                client.call_abort_event.clear()
-                prepare_task = None
+                if _current_log_file:
+                    with open(_current_log_file, "a", encoding="utf-8") as f:
+                        f.write("\n=== CALL ENDED ===\n")
+                break  # одиночный outbound-режим по TARGET_NUMBER
 
-            # Ждём либо ответа абонента, либо отказа (408/486 и т.п.)
-            # Если сработал call_abort_event — выходим, чтобы цикл продолжился.
+            logger.info("📞 Waiting for call...")
+            client.call_abort_event.clear()
+            # Ждём входящего (abort сработает при CANCEL, connect — при _start_rtp)
             connect_task = asyncio.create_task(client.call_connected_event.wait())
             abort_task = asyncio.create_task(client.call_abort_event.wait())
             done, pending = await asyncio.wait(
@@ -243,33 +370,17 @@ async def main():
                 t.cancel()
             if abort_task in done and not connect_task.done():
                 logger.info("⚠️ Call aborted (no answer / rejected) — skipping")
-                if prepare_task is not None and not prepare_task.done():
-                    prepare_task.cancel()
                 continue
-
-            # Если пре-ген ещё не успел — дождёмся (он почти всегда уже готов).
-            # Если абонент отказал — prepare_task сам отвалится по call_abort_event.
-            if prepare_task is not None and not prepare_task.done():
-                logger.info("⏳ Waiting for outgoing greeting to finish...")
-                try:
-                    await prepare_task
-                except Exception as e:
-                    logger.error(f"Prepare outgoing greeting failed: {e}")
-
+            # Входящий состоялся — крутим conversation
             await conversation_loop(stt, tts, bridge, client)
 
             logger.info("Call ended. Saving memory...")
-
-            # 3. Сохранение памяти после звонка
             if client.remote_number:
                 await summarize_and_save(client.remote_number)
 
             if _current_log_file:
                 with open(_current_log_file, "a", encoding="utf-8") as f:
                     f.write("\n=== CALL ENDED ===\n")
-
-            if TARGET_NUMBER:
-                break
             client.call_connected_event.clear()
 
     except KeyboardInterrupt:
