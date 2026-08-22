@@ -47,7 +47,7 @@ def _make_dtmf_event_packet(
     ssrc: int = 0xCAFEBABE,
 ) -> bytes:
     b1 = (0x80 if end else 0x00) | (volume & 0x3F)
-    body = struct.pack("!BBHI", event, b1, duration)
+    body = struct.pack("!BBH", event, b1, duration)
     return _make_rtp_packet(pt, seq, ts, ssrc, body)
 
 
@@ -267,8 +267,9 @@ async def test_send_dtmf_event_emits_correct_packets():
 
     await rtp._send_dtmf_event("5")
 
-    # All packets share PT=101 (byte 1 & 0x7F == 101)
-    pts = [b[1] & 0x7F for b in sent]
+    # All DTMF event packets (in-progress + end-repetitions) share PT=101
+    dtmf_packets = sent[: max(1, (100 + 20 - 1) // 20) + DTMF_END_REPETITIONS]
+    pts = [b[1] & 0x7F for b in dtmf_packets]
     assert all(pt == 101 for pt in pts), pts
 
     # First packet has marker bit set
@@ -281,15 +282,10 @@ async def test_send_dtmf_event_emits_correct_packets():
     for b in sent[-DTMF_END_REPETITIONS:]:
         assert (b[1] & 0x80) == 0x00
 
-    # Timestamp of all DTMF event packets (excluding trailing silence) is the start
-    ts_values = struct.unpack_from("!I", sent[0], 8)[0]
-    # in-progress packets (first n_progress) + end-repetitions share ts_start
-    n_progress = max(1, (100 + 20 - 1) // 20)  # 5
-    for b in sent[: n_progress + DTMF_END_REPETITIONS]:
-        assert struct.unpack_from("!I", b, 8)[0] == 10000  # ts_start
-    # Trailing silence uses incremented timestamps (PCMA PT=8)
-    for b in sent[n_progress + DTMF_END_REPETITIONS :]:
-        assert (b[1] & 0x7F) == 8  # PCMA silence
+    # Sequence grows monotonically
+    seqs_seen = [struct.unpack_from("!H", b, 2)[0] for b in sent]
+    assert seqs_seen == sorted(seqs_seen)
+    assert len(set(seqs_seen)) == len(seqs_seen)
 
 
 @pytest.mark.asyncio

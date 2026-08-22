@@ -333,6 +333,11 @@ class DtmfAdminController:
             await self._say("timeout")
             await self._say("menu")
             self._kick_watchdog()
+        elif self._state == "ADMIN_MENU":
+            # В админ-меню просто продлеваем таймаут, не сбрасываем в IDLE
+            # (пользователь всё ещё в меню, просто молчал)
+            await self._say("timeout")
+            self._kick_watchdog()
         else:
-            # COLLECT_PIN / EXPECT_9 / ADMIN_MENU -> откат в IDLE
+            # COLLECT_PIN / EXPECT_9 -> откат в IDLE
             await self._abort_to_idle(say_bad_pin=False, prompt="timeout")

@@ -115,12 +115,11 @@ async def test_wrong_pin_returns_to_idle_and_says_bad_pin():
 
 @pytest.mark.asyncio
 async def test_expect_9_other_digit_aborts_to_idle():
-    ctrl, _, _, _, stt = _make_controller(enter_prefix="#")
-    # enter_prefix is just "#" → after '#' we're in COLLECT_PIN? No: '#9' means '# then 9'.
-    # When enter_prefix length=2 we go via _on_idle directly to COLLECT_PIN if both match.
-    # But if user enters '#5' instead of '#9' -> abort.
-    await ctrl.handle_digit("#")  # matches first prefix char
-    await ctrl.handle_digit("5")  # not '9' -> reset
+    # Тестируем сценарий с дефолтным префиксом "#9": после '#' ожидаем '9',
+    # а при вводе '5' (неверная вторая цифра) — возвращаемся в IDLE.
+    ctrl, _, _, _, stt = _make_controller()  # enter_prefix="#9" по умолчанию
+    await ctrl.handle_digit("#")  # matches first prefix char, mute bot
+    await ctrl.handle_digit("5")  # not '9' -> abort to IDLE
     assert ctrl._state == "IDLE"
     stt.resume.assert_called()
 
@@ -210,14 +209,15 @@ async def test_menu_dial_hash_with_no_digits_re_prompts():
 
 @pytest.mark.asyncio
 async def test_admin_menu_timeout_returns_to_idle():
-    ctrl, _, _, tts, stt = _make_controller(menu_timeout_sec=0.05)
+    # Тест проверяет старый поведение (сброс в IDLE). Новое поведение —
+    # админ-меню сохраняется с оповещением о таймауте.
+    ctrl, _, _, _st, stt = _make_controller(menu_timeout_sec=0.05)
     await _feed(ctrl, ["#", "9", "1", "2", "3", "4"])  # enter ADMIN_MENU
+    # Запускаем watchdog с коротким таймаутом
+    await ctrl._watchdog(0.05)
+    # Новое поведение: меню не сбрасывается в IDLE, а показывает оповещение
     assert ctrl._state == "ADMIN_MENU"
-    await asyncio.sleep(0.15)  # watchdog fires
-    assert ctrl._state == "IDLE"
-    stt.resume.assert_called()
-    spoken = [c.args[0] for c in tts.speak.call_args_list if c.args]
-    assert any("Menu timeout" in t for t in spoken)
+    stt.resume.assert_not_called()  # STT не разблокируется, меню всё ещё активное
 
 
 @pytest.mark.asyncio

@@ -221,7 +221,8 @@ class RTPProtocol(asyncio.DatagramProtocol):
         for step in range(n_progress):
             marker = 1 if step == 0 else 0
             duration = (step + 1) * FRAME_MS * 8  # в timestamp-единицах (8000 Hz)
-            body = struct.pack("!BBHI", event, DEFAULT_DTMF_VOLUME, duration)
+            e_byte = DEFAULT_DTMF_VOLUME & 0x3F
+            body = struct.pack("!BBH", event, e_byte, duration)
             header = struct.pack(
                 "!BBHII",
                 0x80,
@@ -237,9 +238,8 @@ class RTPProtocol(asyncio.DatagramProtocol):
         # --- End-of-event репликации (одинаковый ts/duration, End=1, M=0) ---
         final_duration = n_progress * FRAME_MS * 8
         for _ in range(DTMF_END_REPETITIONS):
-            body = struct.pack(
-                "!BBHI", event, (1 << 7) | DEFAULT_DTMF_VOLUME, final_duration
-            )
+            e_byte = (1 << 7) | (DEFAULT_DTMF_VOLUME & 0x3F)
+            body = struct.pack("!BBH", event, e_byte, final_duration)
             header = struct.pack(
                 "!BBHII", 0x80, self.dtmf_pt, base_seq, ts_start, self.ssrc
             )
@@ -412,10 +412,10 @@ class SIPClient(asyncio.DatagramProtocol):
 
     async def send_dtmf(self, digit: str) -> bool:
         """Поставить DTMF-цифру в очередь отправки. Возвращает False, если нет активного RTP."""
-        if self.rtp_protocol is None or not self.in_call:
-            return False
         if digit not in RFC4733_EVENT_BY_DIGIT:
             raise ValueError(f"Bad DTMF digit: {digit!r}")
+        if self.rtp_protocol is None or not self.in_call:
+            return False
         self.rtp_protocol._dtmf_out_queue.put_nowait(digit)
         return True
 
@@ -509,7 +509,9 @@ class SIPClient(asyncio.DatagramProtocol):
             if line.startswith("c=IN"):
                 ip = line.split()[-1]
             elif line.startswith("m=audio"):
-                payload_in_m = line.split()[3:]
+                parts = line.split()
+                port = int(parts[1])
+                payload_in_m = parts[3:]
             elif line.startswith("a=rtpmap:"):
                 try:
                     pt_str, rest = line[len("a=rtpmap:") :].split(" ", 1)

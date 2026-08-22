@@ -191,22 +191,27 @@ async def conversation_loop(
 
 
 async def _do_outbound_call(client: SIPClient, target: str, stt, tts, bridge):
-    """Инициирует исходящий звонок к `target`, ждёт ответа/отказа,
-    проговаривает outgoing greeting, крутит conversation_loop.
+    """Инициирует исходящий звонок к `target`.
 
-    Возвращает True, если разговор состоялся (after conversation_loop),
-    False — если абонент не ответил/отказал (call abort'нулся).
+    Алгоритм:
+    1. Генерирует OUTGOING-Greeting (Сначала!, чтобы аудио было готово).
+    2. Сбрасываем remote_number и abort — пре- gén использует remote_number.
+    3. Отправляем INVITE.
+    4. Ждём ответа/отказа (408/486 и т.п.).
+    5. Запускаем conversation_loop (уже готовое аудио лежит в buffer).
+    Возвращает True, если разговор состоялся, False — если абонент не ответил.
     """
-    # Сбрасываем remote_number и abort — пре-ген использует remote_number
+    # 0. Сбрасываем состояние вызова ДО генерации приветствия
     client.remote_number = target
     client.call_abort_event.clear()
 
-    # Стартуем пре-ген параллельно invite — бот генерит реплику пока у
-    # абонента идут гудки. Аудио копится в bridge.buffer.
-    prepare_task = asyncio.create_task(prepare_outgoing_greeting(client))
+    # 1. Генерация OUTGOING-Greeting (Сначала!, чтобы аудио было готово)
+    await prepare_outgoing_greeting(client)
+
+    # 2. Отправляем INVITE
     await client.invite(target)
 
-    # Ждём либо ответа абонента, либо отказа (408/486 и т.п.)
+    # 3. Ждём ответа/отказа (408/486 и т.п.)
     connect_task = asyncio.create_task(client.call_connected_event.wait())
     abort_task = asyncio.create_task(client.call_abort_event.wait())
     done, pending = await asyncio.wait(
@@ -216,19 +221,11 @@ async def _do_outbound_call(client: SIPClient, target: str, stt, tts, bridge):
         t.cancel()
     if abort_task in done and not connect_task.done():
         logger.info("⚠️ Call aborted (no answer / rejected) — skipping")
-        if not prepare_task.done():
-            prepare_task.cancel()
         return False
 
-    if not prepare_task.done():
-        logger.info("⏳ Waiting for outgoing greeting to finish...")
-        try:
-            await prepare_task
-        except Exception as e:
-            logger.error(f"Prepare outgoing greeting failed: {e}")
-
+    # 5. У аудио уже есть готовый фрейм в buffer от prepare_outgoing_greeting,
+    #    conversation_loop сам возьмёт его оттуда и начнёт проигрывать.
     await conversation_loop(stt, tts, bridge, client)
-    return True
 
 
 async def main():
